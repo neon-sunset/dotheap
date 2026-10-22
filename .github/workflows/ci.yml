@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: python3 scripts/generate-notices.py --check
+      - run: cargo build --release --locked -p dotheap
+      - run: scripts/make-app.sh
+      - run: git diff --exit-code -- Sources/RustHeapCore/Generated.swift Sources/RustHeapCoreFFI crates/heap-bridge/src/generated.rs crates/heap-bridge/src/models.rs
+      - run: swift test
+      - run: target/release/dotheap help
+      - run: python3 scripts/check-heap-contract.py target/release/dotheap
+      - run: python3 scripts/check-core-headers.py target/release/dotheap
+      - run: python3 scripts/check-compressed-core.py target/release/dotheap
+      - run: python3 scripts/check-runtime-dump.py target/release/dotheap
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: rust:1.94-bookworm
+      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.arch }}-unknown-linux-musl
+      CC: musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends musl-tools python3 zstd
+      - run: rustup target add "$CARGO_BUILD_TARGET"
+      - run: cargo test --locked -p heap-core -p dotheap
+      - run: cargo build --release --locked -p dotheap
+      - run: cargo build --release --locked -p heap-core --example live_dump_checks
+      - run: strip target/$CARGO_BUILD_TARGET/release/dotheap
+      - run: target/$CARGO_BUILD_TARGET/release/dotheap help
+      - run: python3 Tests/LiveDump/check.py target/$CARGO_BUILD_TARGET/release/examples/live_dump_checks --cancellation
+      - run: python3 scripts/check-runtime-dump.py target/$CARGO_BUILD_TARGET/release/dotheap
+      - run: python3 scripts/check-core-headers.py target/$CARGO_BUILD_TARGET/release/dotheap
+      - run: python3 scripts/check-compressed-core.py target/$CARGO_BUILD_TARGET/release/dotheap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotheap-linux-${{ matrix.arch }}
+          path: target/${{ matrix.arch }}-unknown-linux-musl/release/dotheap
+          retention-days: 1
+
+  windows:
+    runs-on: windows-2022
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: cargo test --locked -p heap-core -p dotheap
+      - run: cargo build --release --locked -p dotheap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotheap-windows-x64
+          path: target/x86_64-pc-windows-msvc/release/dotheap.exe
+          retention-days: 1
+
+  # Takes full dumps of the demo app through its diagnostics socket (dotheap dump --offline) with the stock GC
+  # (workstation and server) and with Satori (a self-contained publish, through the PublishWithSatoriGC SDK), on x64 and
+  # arm64, and checks dotheap's results against what the demo allocates. Then dumps the demo while it runs and writes
+  # memory (dotheap dump: soft-dirty bits on x64, page hashes on arm64) and checks that the dump holds one moment and
+  # the same results.
+  demo-linux:
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, rid: linux-x64, gc: workstation }
+          - { arch: x86_64, runner: ubuntu-24.04, rid: linux-x64, gc: server }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, rid: linux-arm64, gc: workstation }
+          - { arch: x86_64, runner: ubuntu-24.04, rid: linux-x64, gc: satori }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, rid: linux-arm64, gc: satori }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: dotheap-linux-${{ matrix.arch }}
+          path: bin
+      - name: Dump the demo
+        run: |
+          chmod +x bin/dotheap
+          if [ "${{ matrix.gc }}" = satori ]; then
+            dotnet publish demo -c Release -r ${{ matrix.rid }} --self-contained -o demo-out
+            run="demo-out/Demo"
+          else
+            dotnet publish demo -c Release -o demo-out
+            if [ "${{ matrix.gc }}" = server ]; then export DOTNET_gcServer=1; fi
+            run="dotnet demo-out/Demo.dll"
+          fi
+          start() {
+            $run > demo.out &
+            for i in $(seq 1 120); do grep -q ready demo.out && break; sleep 1; done
+            pid=$(awk '/ready/{print $2}' demo.out)
+          }
+          start
+          bin/dotheap ps
+          bin/dotheap dump "$pid" --offline --out "$PWD/demo.dmp"
+          kill "$pid"
+          # Again with a thread that writes memory all the time, dumped while it runs (ptrace needs root here).
+          export DEMO_WRITES=1
+          start
+          sudo bin/dotheap dump "$pid" --out "$PWD/running.dmp.zst"
+          sudo chown "$(id -u)" running.dmp.zst running.smaps.zst
+          kill "$pid"
+      - run: python3 scripts/check-heap-contract.py bin/dotheap
+      - if: matrix.arch == 'x86_64' && matrix.gc == 'workstation'
+        run: zstd -q -T0 demo.dmp -o demo.dmp.zst
+      - if: matrix.arch == 'x86_64' && matrix.gc == 'workstation'
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-dump-linux
+          path: demo.dmp.zst
+          retention-days: 1
+      - run: bin/dotheap summary demo.dmp
+      - run: bin/dotheap fragmentation demo.dmp --limit 3
+      - run: scripts/check-demo.sh bin/dotheap demo.dmp ${{ matrix.gc == 'satori' && 'Satori' || 'CoreCLR' }}
+      - run: python3 scripts/check-while-running.py running.dmp.zst
+      - run: mkdir running && cd running && ../scripts/check-demo.sh ../bin/dotheap ../running.dmp.zst ${{ matrix.gc == 'satori' && 'Satori' || 'CoreCLR' }}
+      - if: failure()
+        run: zstd -q -f -T0 demo.dmp -o demo.dmp.zst
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-dump-failed-${{ matrix.arch }}-${{ matrix.gc }}
+          path: |
+            demo.dmp.zst
+            running.dmp.zst
+          retention-days: 3
+
+  # Reads the compressed Linux demo dump with the Windows and macOS binaries.
+  demo-other-platforms:
+    needs: [demo-linux, windows]
+    strategy:
+      matrix:
+        os: [windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: demo-dump-linux
+      - if: runner.os == 'Windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: dotheap-windows-x64
+          path: bin
+      - if: runner.os == 'macOS'
+        uses: dtolnay/rust-toolchain@1.94.0
+      - if: runner.os == 'macOS'
+        run: cargo build --release --locked -p dotheap && mkdir -p bin && cp target/release/dotheap bin/
+      - run: scripts/check-demo.sh bin/dotheap demo.dmp.zst

@@ -1,0 +1,15 @@
+.build/
+.swiftpm/
+*.xcodeproj
+Dotheap.app/
+.DS_Store
+demo/bin/
+demo/obj/
+*.iconset/
+.rust-target/
+target/
+/bin/
+*.dmp
+*.dmp.zst
+*.smaps
+*.smaps.zst

@@ -1,0 +1,467 @@
+{
+  "commands": [
+    {
+      "name": "summary",
+      "usage": "<core>",
+      "summary": "memory totals, findings and the largest retainers",
+      "options": [],
+      "details": "Shows process memory by kind, managed and malloc totals, findings, warnings\nand the largest retainers. The next list contains commands with addresses\nfilled in; follow it to inspect the objects behind a finding."
+    },
+    {
+      "name": "verify",
+      "usage": "<core>",
+      "summary": "object, type and runtime integrity diagnostics",
+      "options": [],
+      "details": "Validates object sizes, MethodTables, GC descriptors, managed references,\nruntime thread links, CoreCLR segment and finalization queue boundaries,\nand Satori region and finalization-tracker links.\nReports the address, value and reason for each diagnostic. Missing memory\nis separate from invalid data. Native pointer fields are not scanned as\nmanaged references. A capture during GC can contain temporary inconsistencies.\n\nRuns without the reference graph, including when ordinary analysis fails.\nReads the dump directly; does not use or rebuild the analysis cache.\nReturns 0 when the report is complete, even if it contains diagnostics;\n1 on failure. JSON includes exact totals and at most 1,000 details per diagnostic category;\n--limit controls how many of those details are printed."
+    },
+    {
+      "name": "types",
+      "usage": "<core>",
+      "summary": "types by retained, live or dead bytes",
+      "options": [
+        "--sort retained|live|dead|count",
+        "--match <text>    types whose name contains the text"
+      ],
+      "details": ""
+    },
+    {
+      "name": "instances",
+      "usage": "<core> <type>",
+      "summary": "objects of a type, largest first; accepts a full or partial type name",
+      "options": [
+        "--live, --pending, --dead   objects that are live, pending finalization or dead",
+        "--sort retained|size",
+        "--text <text>     objects whose string, or identifying string field, contains the text"
+      ],
+      "details": ""
+    },
+    {
+      "name": "object",
+      "usage": "<core> <address>",
+      "summary": "object fields, references, root path and native allocations",
+      "options": [],
+      "details": "Accepts any address inside an object. Shows its fields and contents,\nobjects that reference it, a path from a root, and native memory it owns.\nUse retained to see the managed and native bytes that depend on this object."
+    },
+    {
+      "name": "retained",
+      "usage": "<core> [<address>]",
+      "summary": "memory retained by an object or chunk; omit the address to list roots",
+      "options": [],
+      "details": "Shows dominator-tree children grouped by type, including managed and\nnative memory. An address can be inside an object or malloc chunk. Without\nan address, lists root sources. Retained bytes are bytes reachable only\nthrough an owner in the detected graph; they are not an RSS prediction."
+    },
+    {
+      "name": "handles",
+      "usage": "<core>",
+      "summary": "GC handles by handle type and target type",
+      "options": [],
+      "details": ""
+    },
+    {
+      "name": "regions",
+      "usage": "<core> [<address>]",
+      "summary": "heap regions by generation, queue or size; an address selects one region",
+      "options": [
+        "--by generation|queue|size"
+      ],
+      "details": "Without an address, groups regions by generation, queue or size and shows\noccupancy. An address selects its containing region, including its memory\ntotals and object types."
+    },
+    {
+      "name": "threads",
+      "usage": "<core> [<tid>]",
+      "summary": "thread stacks; a thread ID selects one thread",
+      "options": [],
+      "details": "Lists threads by stack depth, with their current function. A thread ID\nselects its frames. Frames are estimated from return addresses on the stack;\nstale stack contents can add frames. Use stacks for a merged tree."
+    },
+    {
+      "name": "stacks",
+      "usage": "<core>",
+      "summary": "thread stacks grouped by shared frames",
+      "options": [],
+      "details": "Merges threads by managed frames, from outermost to innermost, and shows\nwhether each group runs, sleeps, waits for a lock or is otherwise blocked.\nFrames are estimated from return addresses; stale frames can split groups."
+    },
+    {
+      "name": "native",
+      "usage": "<core>",
+      "summary": "glibc allocations by owner and library, plus arena totals (Linux)",
+      "options": [
+        "--reach native|live|pending|dead|unreferenced",
+        "--match <text>    groups whose label contains the text",
+        "--library <name>"
+      ],
+      "details": "Groups glibc malloc chunks by what holds them: native roots, managed owners\nor other chunks. Includes C++ class and library names and arena heaps by\nresident free memory. Unreferenced chunks are leak candidates. Use chunk\nfor one allocation and malloc-arenas for free memory retained by glibc."
+    },
+    {
+      "name": "malloc-arenas",
+      "usage": "<core>",
+      "summary": "free memory retained by glibc arenas and options to release it (Linux)",
+      "options": [],
+      "details": "Separates free chunks from the free end of each heap (the top chunk), and\ngroups arenas by attached thread count, including arenas whose threads exited.\nShows glibc trim, mmap and arena settings from the dump, plus the estimated\neffect of malloc_trim(0), trim_threshold, arena_max and a restart."
+    },
+    {
+      "name": "chunk",
+      "usage": "<core> <address>",
+      "summary": "a malloc allocation, its owner and its references",
+      "options": [],
+      "details": "Accepts any address inside a malloc chunk. Shows its class or label,\nreferences and path to a root. Managed references use field layouts;\nnative scans are conservative. Possible managed references are raw address\nmatches and do not establish retention. Unreferenced chunks are leak candidates."
+    },
+    {
+      "name": "bytes",
+      "usage": "<core> <address>",
+      "summary": "memory as hex, with pointers resolved to objects or functions",
+      "options": [
+        "--count <n>       bytes to read (default 256)"
+      ],
+      "details": "Shows a hex dump and resolves each 8-byte word to an object or function\nwhen possible. --count sets the number of bytes to read."
+    },
+    {
+      "name": "find",
+      "usage": "<core> <value>",
+      "summary": "locations containing an 8-byte value, such as a pointer or handle",
+      "options": [],
+      "details": "Finds an 8-byte value in object fields, malloc chunks, thread stacks and\nother memory. Use it to locate copies of a pointer or GC handle."
+    },
+    {
+      "name": "memory",
+      "usage": "<core>",
+      "summary": "memory in the dump by kind; with --smaps, resident memory by kind",
+      "options": [],
+      "details": ""
+    },
+    {
+      "name": "garbage",
+      "usage": "<core>",
+      "summary": "unreachable objects, grouped by the dead objects that retain them",
+      "options": [],
+      "details": "Shows objects that are unreachable but have not been swept. Each group\nstarts with a dead object that no other dead object references, and includes\nthe dead objects reachable only through it. This is not evidence of a leak."
+    },
+    {
+      "name": "fragmentation",
+      "usage": "<core>",
+      "summary": "dead objects, unused committed space and the survivors that keep it allocated",
+      "options": [],
+      "details": "Shows dead objects and unused committed space, grouped by the GC rule\nthat keeps it and by the type or owner of the survivors. Each region's space\nis attributed to its live objects in proportion to their sizes. GC storage,\nobjects pending finalization and unparsed bytes are excluded."
+    },
+    {
+      "name": "strings",
+      "usage": "<core>",
+      "summary": "live strings with the same contents",
+      "options": [],
+      "details": ""
+    },
+    {
+      "name": "collections",
+      "usage": "<core>",
+      "summary": "collection capacity and unused slots",
+      "options": [],
+      "details": "Compares backing-array capacity with used slots in live List, Dictionary,\nHashSet, Queue and Stack instances. Groups totals by type and gives an\nexample address to inspect."
+    },
+    {
+      "name": "finalizable",
+      "usage": "<core>",
+      "summary": "objects with finalizers, grouped by reachability and finalizer state",
+      "options": [],
+      "details": "Separates live registered, live suppressed or immortal, resurrected,\npending-finalization and dead objects. Re-registration can leave an object\npending after its finalizer has run; the dump cannot show its history."
+    },
+    {
+      "name": "zero-arrays",
+      "usage": "<core>",
+      "summary": "live arrays of 1 KB and more that are at least 90% zero bytes",
+      "options": [],
+      "details": ""
+    },
+    {
+      "name": "cache",
+      "usage": "",
+      "summary": "list cached analyses and their disk usage; optionally delete them",
+      "options": [
+        "--delete missing|all|<folder>   remove caches for missing dumps, all dumps or one folder"
+      ],
+      "details": "Lists each cached analysis, its disk usage, last-opened time and source dump.\n--delete takes missing, all, or a folder name from this list. It deletes\nanalysis caches, not source dumps or the live and symbols folders."
+    },
+    {
+      "name": "ps",
+      "usage": "",
+      "summary": "running .NET processes found through diagnostics sockets",
+      "options": [],
+      "details": "Lists PID, user, program and diagnostics socket for .NET processes found\nin TMPDIR and /tmp. Diagnostics must be enabled; capture needs permission\nto use the socket.\nProcess discovery and capture are supported on Linux and macOS."
+    },
+    {
+      "name": "dump",
+      "usage": "<pid>",
+      "summary": "capture a process and print the dump path",
+      "options": [
+        "--out <path>      output file or folder (also -o); defaults to the cache folder",
+        "--offline         let the .NET runtime write the dump; pauses for the raw dump write"
+      ],
+      "details": "On Linux, Dotheap copies memory while the process runs, then pauses its\nthreads to read registers and finish the copy. File and shared mappings\nare read again during this pause. Busy processes, large heaps, low memory\nand slow storage can cause long pauses. Other processes can still change\nshared memory. Requires ptrace access: usually root, or the target user\nwith suitable process permissions and kernel.yama.ptrace_scope.\n\nRuntime capture requires --offline, including on macOS. It uses the same\n.NET diagnostics protocol as dotnet-dump. The process stays paused until\nthe raw dump is written. Run as the target user or root; the target user\nmust be able to write to the output directory. Dotheap never switches to\nruntime capture automatically when live capture is unavailable or fails.\n\n--out accepts a filename or an existing directory, relative to dotheap's\nworking directory. A directory gets <program>-<pid>-<time>.dmp.zst.\nThe default is the cache's live folder. When root requests a runtime dump\nof another user's process, the default is a new directory in /tmp.\nExisting files are never replaced.\n\nLinux live capture always writes Zstandard data. Runtime capture compresses\nafter the process resumes, unless the output name omits .zst. If compression\nor publication fails, the error gives the raw dump's recovery path.\nLinux capture also saves <name>.smaps.zst beside <name>.dmp[.zst] for resident\nmemory analysis; it is loaded automatically.\n\nCapture fails if the process exits, replaces its address space or cannot\nbe read at the final pause. Live capture needs space for temporary copies\nbeside the output. Periodic free-space checks stop capture below 2 GiB.\nRuntime capture needs space for both the raw and compressed dump.\nThe completed path goes to stdout, or {\"dump\":\"<path>\"} with --json.\nProgress goes to stderr, including the pause count, total pause time\nand longest pause."
+    },
+    {
+      "name": "search",
+      "usage": "<core> <text>",
+      "summary": "search findings, types, methods, native allocations and addresses",
+      "options": [],
+      "details": "Searches findings, report rows (including methods, callbacks and fields),\ntypes and malloc chunk groups. An address reports what occupies that memory."
+    },
+    {
+      "name": "findings",
+      "usage": "<core>",
+      "summary": "find potential leaks, blocked work and inefficient memory use",
+      "options": [],
+      "details": "Lists findings and the commands for detailed reports.\nEach report includes its row count. Use summary for a ranked overview."
+    },
+    {
+      "name": "async",
+      "usage": "<core>",
+      "summary": "async call chains, awaited operations and shared waits",
+      "options": [],
+      "details": "Shows unfinished async call graphs, including Task.WhenAll, WhenAny and\nTask.Run, what the innermost call awaits, and what owns that operation.\nShared waits, synchronous task waits, cycles and isolated waits are listed.\nThe dump contains no wait durations; matching PDBs can add await source lines."
+    },
+    {
+      "name": "tasks",
+      "usage": "<core> [<address>]",
+      "summary": "async calls grouped by stack; an address selects a call or awaited object",
+      "options": [],
+      "details": "Lists running, queued and waiting calls by async stack, with the number\nof awaited objects. An address selects a call or the object it awaits.\nThe result shows calls sharing that wait, their call tree, state-machine\nfields and paths from roots. Matching PDBs can add await source lines."
+    },
+    {
+      "name": "arraypool",
+      "usage": "<core>",
+      "summary": "shared ArrayPool: arrays returned twice, used after return, and dead arrays of pool sizes",
+      "options": [],
+      "details": "Checks shared ArrayPool partitions and thread-local slots. Duplicate slots\nindicate a double return; references from live objects can indicate use after\nreturn. Dead arrays of bucket sizes are only missed-return candidates: arrays\nallocated directly with those sizes look the same."
+    },
+    {
+      "name": "large-objects",
+      "usage": "<core>",
+      "summary": "large objects by type and reachability, with unused region space",
+      "options": [],
+      "details": "Uses a size threshold of 85,000 bytes for stock CoreCLR or 32 KB for Satori.\nShows live and dead objects by type. Stock GC results include LOH dead objects\nand free gaps; Satori results include committed space beyond huge objects\nthat occupy their own regions."
+    },
+    {
+      "name": "cancellation",
+      "usage": "<core>",
+      "summary": "callbacks registered on each CancellationTokenSource",
+      "options": [],
+      "details": "Shows registered callbacks on live CancellationTokenSource objects, grouped\nby source and callback method. Undisposed registrations or linked token\nsources can keep callback targets and state alive."
+    },
+    {
+      "name": "events",
+      "usage": "<core>",
+      "summary": "events with many subscribers, grouped by owner",
+      "options": [],
+      "details": "Shows multicast delegates with many subscribers, grouped by the object\nand field that hold them and by subscriber type. A long-lived publisher\ncan keep subscribers alive after they are otherwise unused."
+    },
+    {
+      "name": "timers",
+      "usage": "<core>",
+      "summary": "timers, their callbacks, awaited operations and owners",
+      "options": [],
+      "details": "Includes Timer, System.Timers.Timer, PeriodicTimer, Task.Delay, Task.WaitAsync\nand CancelAfter timers. Shows callback methods or awaiting async calls,\nowners and periods. Source lines need matching PDBs. Timer ages are relative\nto the latest timer start in the dump, not the capture time."
+    },
+    {
+      "name": "locks",
+      "usage": "<core>",
+      "summary": "held locks, likely waiting threads and possible deadlocks",
+      "options": [],
+      "details": "Includes lock/Monitor.Enter and System.Threading.Lock. Waiters are inferred\nfrom a lock-enter frame and a stack pointer to a lock held by another thread.\nFrames are estimated, so inspect the listed wait chains and possible deadlocks."
+    },
+    {
+      "name": "blocked",
+      "usage": "<core>",
+      "summary": "threads in synchronous waits, grouped by application frame",
+      "options": [],
+      "details": "Groups synchronous waits such as Task.Wait, GetResult and Monitor.Wait by\nthe first application frame. Includes busy, blocked and idle thread pool\nworkers and queued work. Work waiting while workers are blocked can indicate\nthread pool starvation; frames are estimated from stack return addresses."
+    },
+    {
+      "name": "network",
+      "usage": "<core>",
+      "summary": "sockets, HTTP requests, connection pools and pending I/O",
+      "options": [],
+      "details": "Shows socket file descriptors, endpoints, owners and pending reads/writes;\nKestrel and HttpClient requests; HttpClient pools; and socket engines\n(epoll on Linux, kqueue on macOS). A pending receive can be an idle connection.\nClosed sockets can remain referenced by pooled objects."
+    },
+    {
+      "name": "symbols",
+      "usage": "<core>",
+      "summary": "download .NET runtime symbols for a Linux dump",
+      "options": [],
+      "details": "Downloads .NET runtime debug files from Microsoft's symbol server, matched\nby build ID. Files are cached under dotheap/symbols and reused across dumps\nto name native frames. For Satori or another custom runtime, put matching\ndebug files such as libcoreclr.so.dbg in a --dlls directory."
+    },
+    {
+      "name": "files",
+      "usage": "<core>",
+      "summary": "managed and native file handles, pending I/O and mapped files",
+      "options": [],
+      "details": "Shows managed file paths, descriptors, access modes, positions, buffered\nbytes, pending I/O and owners, plus native paths and mapped files. Native\ndescriptors are inferred from the integer after a path in a C++ object;\nthe dump has no kernel file table, so this is not a complete open-file list."
+    },
+    {
+      "name": "connections",
+      "usage": "<core>",
+      "summary": "pending HTTP requests and socket events",
+      "options": [],
+      "details": "Shows incoming Kestrel requests by stage, outgoing HttpClient requests\nawaiting responses or connections, and SocketAsyncEngine events queued for\na worker. Use network for all sockets, requests and connection pools."
+    },
+    {
+      "name": "exceptions",
+      "usage": "<core>",
+      "summary": "exceptions by type and throwing method, plus unobserved task failures",
+      "options": [],
+      "details": "Groups live and dead exceptions by type and the method in their saved\nthrow stack. Also groups faulted tasks by exception and observation state.\nMany dead exceptions at one site can indicate frequent throwing. Unthrown\nexceptions have no saved stack; the dump is not a complete exception history."
+    },
+    {
+      "name": "instance-counts",
+      "usage": "<core>",
+      "summary": "counts and owners of commonly shared objects, such as HttpClient",
+      "options": [],
+      "details": "Counts live HttpClient instances, handlers, JsonSerializerOptions, Regex,\nservice providers and other commonly shared or disposable types. Counts at\nor above each type's threshold produce findings. Inspect their owners to\ndistinguish expected usage from unnecessary instances."
+    },
+    {
+      "name": "finalizer-backlog",
+      "usage": "<core>",
+      "summary": "native memory retained by objects awaiting finalization",
+      "options": [],
+      "details": "Shows malloc memory reachable only through objects pending finalization.\nTheir finalizers may release it. Inspect the owning types and whether earlier\ndisposal could have released the native resources."
+    },
+    {
+      "name": "native-held-by-dead",
+      "usage": "<core>",
+      "summary": "native allocations referenced only by dead managed objects",
+      "options": [],
+      "details": "Shows allocated malloc chunks referenced only by dead managed objects,\ngrouped by type and field. No pending finalizer remains for those owners.\nThe memory may have leaked, or malloc may have reused a freed allocation\nwhile the dead object still contains its old address."
+    },
+    {
+      "name": "boxed",
+      "usage": "<core>",
+      "summary": "boxed primitive and enum values",
+      "options": [],
+      "details": ""
+    }
+  ],
+  "common": [
+    "--json            JSON: bytes as numbers, addresses as \"0x...\" strings; no table truncation",
+    "--limit <n>       rows per list (default 20; 0 for all); omitted counts are reported",
+    "--dlls <dir>      search recursively for missing assemblies, native binaries and PDBs; repeatable",
+    "--smaps <file>    /proc/<pid>/smaps or macOS vmmap output; accepts .zst and .gz\n                    default: <name>.smaps.zst, .smaps.gz or .smaps beside <name>.dmp[.zst]",
+    "--cache <dir>     save analysis results in this folder instead of the user cache",
+    "--no-cache        analyze without a cache; requires an uncompressed dump",
+    "--rebuild         process the dump again in the default cache",
+    "--native-roots    count pointers in writable native memory as managed roots\n                    conservative: stale pointers can keep otherwise dead objects live",
+    "--progress        print processing phases to stderr; warnings are always printed",
+    "--pid <pid>       capture and analyze instead of <core>; --out and --offline apply\n                    see dotheap help dump for permissions, output paths and pauses"
+  ],
+  "groups": [
+    {
+      "title": "start here",
+      "names": [
+        "summary",
+        "findings",
+        "verify",
+        "search"
+      ]
+    },
+    {
+      "title": "memory",
+      "names": [
+        "memory",
+        "regions",
+        "native",
+        "malloc-arenas",
+        "types",
+        "instances",
+        "threads",
+        "bytes",
+        "find",
+        "symbols"
+      ]
+    },
+    {
+      "title": "ownership",
+      "names": [
+        "retained",
+        "object",
+        "chunk",
+        "handles"
+      ]
+    },
+    {
+      "title": "waste",
+      "names": [
+        "garbage",
+        "fragmentation"
+      ]
+    },
+    {
+      "title": "concurrency",
+      "names": [
+        "tasks",
+        "stacks",
+        "timers"
+      ]
+    },
+    {
+      "title": "I/O",
+      "names": [
+        "network",
+        "files"
+      ]
+    },
+    {
+      "title": "findings: application",
+      "names": [
+        "async",
+        "arraypool",
+        "large-objects",
+        "cancellation",
+        "events",
+        "blocked",
+        "locks",
+        "exceptions",
+        "connections",
+        "instance-counts",
+        "finalizer-backlog",
+        "native-held-by-dead",
+        "finalizable"
+      ]
+    },
+    {
+      "title": "findings: heap use",
+      "names": [
+        "collections",
+        "strings",
+        "zero-arrays",
+        "boxed"
+      ]
+    },
+    {
+      "title": "running processes",
+      "names": [
+        "ps",
+        "dump"
+      ]
+    },
+    {
+      "title": "cache",
+      "names": [
+        "cache"
+      ]
+    }
+  ],
+  "sos": {
+    "dumpheap": "`dotheap types <core>` lists types by size (dumpheap -stat), `dotheap instances <core> <type>` the objects of a type (dumpheap -type)",
+    "gcroot": "`dotheap object <core> <address>` shows the path from an object to a root",
+    "dumpobj": "`dotheap object <core> <address>` shows the fields of an object",
+    "do": "`dotheap object <core> <address>` shows the fields of an object",
+    "objsize": "`dotheap retained <core> <address>` shows what an object keeps alive",
+    "eeheap": "`dotheap memory <core>` and `dotheap regions <core>` show the memory of the heap",
+    "heapstat": "`dotheap regions <core>` shows the heap by generation",
+    "gcwhere": "`dotheap regions <core> <address>` shows the region of an address",
+    "clrstack": "`dotheap threads <core> <tid>` shows the frames of a thread, `dotheap stacks <core>` all threads merged by their frames",
+    "dumpasync": "`dotheap tasks <core>` and `dotheap async <core>` show the async calls that wait",
+    "gchandles": "`dotheap handles <core>` shows the GC handles",
+    "finalizequeue": "`dotheap finalizable <core>` shows the objects with finalizers",
+    "syncblk": "`dotheap locks <core>` shows the locks held and the threads that wait for them",
+    "printexception": "`dotheap exceptions <core>` shows the exceptions",
+    "pe": "`dotheap exceptions <core>` shows the exceptions",
+    "verifyheap": "`dotheap verify <core>` validates heap and runtime structures",
+    "verifyobj": "`dotheap verify <core>` reports corrupt objects and their addresses"
+  }
+}

@@ -1,0 +1,131 @@
+name: Release
+
+# A tag builds a draft release. A manual run only builds the packages.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version and CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "The tag must match version $version in Cargo.toml." >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success" \
+            --jq '.workflow_runs | length > 0' | grep -qx true || {
+              echo "CI must pass on $GITHUB_SHA before building a release." >&2
+              exit 1
+            }
+      - name: Package source
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+          mkdir dist
+          git archive --format=tar.gz --prefix="dotheap-$version/" HEAD > dist/dotheap-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: dist/*
+          retention-days: 1
+
+  macos:
+    needs: validate
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt
+      - name: Build
+        run: |
+          scripts/build-macos.sh
+          target/release/dotheap help
+          mkdir dist
+          tar -czf dist/dotheap-macos-arm64.tar.gz LICENSE THIRD-PARTY-NOTICES.txt -C target/release dotheap
+          ditto -c -k --keepParent Dotheap.app dist/Dotheap-macos-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+          retention-days: 1
+
+  linux:
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: rust:1.94-bookworm
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.arch }}-unknown-linux-musl
+      CC: musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends musl-tools
+      - run: rustup target add "$CARGO_BUILD_TARGET"
+      - name: Build
+        run: |
+          cargo build --release --locked -p dotheap
+          strip target/$CARGO_BUILD_TARGET/release/dotheap
+          target/$CARGO_BUILD_TARGET/release/dotheap help
+          mkdir dist
+          tar -czf dist/dotheap-linux-${{ matrix.arch }}.tar.gz LICENSE THIRD-PARTY-NOTICES.txt -C target/$CARGO_BUILD_TARGET/release dotheap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 1
+
+  windows:
+    needs: validate
+    runs-on: windows-2022
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Build
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p dotheap
+          target/x86_64-pc-windows-msvc/release/dotheap.exe help
+          New-Item -ItemType Directory dist
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/dotheap.exe,LICENSE,THIRD-PARTY-NOTICES.txt -DestinationPath dist/dotheap-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          retention-days: 1
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --generate-notes *

@@ -1,0 +1,78 @@
+import Foundation
+import RustHeapCore
+
+public enum CacheChoice: Sendable, Equatable {
+    case automatic, rebuild
+    case folder(String)
+    public static var root: String { RustHeapCore.cacheRoot() }
+    public static let otherFolders = ["symbols": "debug files of .NET runtimes", "live": "dumps that dotheap wrote"]
+    public static func entries(measure: Bool = true) -> RustArray<CacheEntry> { RustHeapCore.cacheEntries(measure: measure) }
+    public static func diskBytes(_ path: String) -> UInt64 { RustHeapCore.diskBytes(path: path) }
+    public static func remove(_ entry: CacheEntry) throws { try RustHeapCore.removeCache(entry: entry) }
+}
+
+public func analysisErrorMessage(_ error: Error) -> String {
+    if let error = error as? AnalysisError, case .Failed(let message) = error { return message }
+    return error.localizedDescription
+}
+
+public enum LiveProcess {
+    public typealias Process = RustHeapCore.Process
+    public static func list() -> RustArray<Process> { RustHeapCore.processes() }
+    public static func absolute(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+    public static func defaultDumpPath(for process: Process) throws -> String { try RustHeapCore.defaultDumpPath(process: process) }
+    public static func writeDump(_ process: Process, to path: String) throws {
+        try RustHeapCore.writeRuntimeDump(process: process, path: path, progress: nil)
+    }
+}
+
+public enum TypeNames {
+    public static func short(_ name: String) -> String { RustHeapCore.shortTypeName(name: name) }
+    public static func withoutNamespaces(_ name: String) -> String { RustHeapCore.withoutNamespaces(name: name) }
+    public static func propertyName(_ path: String) -> String { RustHeapCore.propertyName(name: path) }
+}
+
+extension SmapsMapping {
+    public static func isSmaps(_ path: String) -> Bool {
+        [".smaps", ".smaps.zst", ".smaps.gz"].contains { path.hasSuffix($0) }
+    }
+    public static func dump(nextTo path: String) -> String? { RustHeapCore.dumpNextToSmaps(path: path) }
+}
+
+extension Residency {
+    public var agrees: Bool { RustHeapCore.residencyAgrees(residency: self) }
+    public var warning: String? { RustHeapCore.residencyWarning(residency: self) }
+}
+
+extension CacheEntry: Identifiable {
+    public var id: String { directory }
+    public var openedDate: Date { Date(timeIntervalSince1970: lastOpened) }
+}
+
+extension RustHeapCore.Process: Identifiable {
+    public var id: Int32 { pid }
+}
+
+public enum HandleTables {
+    public static let typeNames = Dictionary(uniqueKeysWithValues: (UInt8(0)...UInt8(11)).map {
+        ($0, RustHeapCore.handleTypeName(kind: $0))
+    })
+}
+
+public struct NativeMemory: Sendable {
+    public typealias Mapping = RustHeapCore.Mapping
+    public typealias MallocHeap = RustHeapCore.MallocHeap
+    public typealias MallocParameters = RustHeapCore.MallocParameters
+    let value: RustHeapCore.NativeMemory
+    public let categories: RustArray<RustHeapCore.Category>
+    public var mappings: RustArray<Mapping> { value.mappings }
+    public var mallocHeaps: RustArray<MallocHeap> { value.mallocHeaps }
+    public var mmappedChunks: Int { value.mmappedChunks }
+    public var mmappedBytes: UInt64 { value.mmappedBytes }
+    public var glibcVersion: String? { value.glibcVersion }
+    public static func attachedThreads(dump: CoreDump, arena: UInt64) throws -> UInt64 {
+        try RustHeapCore.attachedThreads(arena: arena, snapshot: dump.bridge)
+    }
+}
+
+public func verifyHeap(path: String) throws -> HeapVerification { try RustHeapCore.verifyHeap(path: path) }
