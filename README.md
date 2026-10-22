@@ -3,8 +3,7 @@
 <img src="assets/icon.png" width="96" align="right" alt="">
 
 #### Disclaimer 1
-Dotheap is authored entirely with AI tools. That's right, I have not written even a single line of code here.
-And this is good(?) - yelling at digital spirits is all you need.
+Dotheap is authored entirely with AI tools. Yelling at digital spirits is all you need.
 
 #### Disclaimer 2
 This tool can and will sometimes produce inaccurate numbers.  
@@ -37,7 +36,7 @@ The CLI runs on Linux, macOS and Windows. It is designed to be agent-friendly bu
 
 The Viewer is a native macOS application which mainly exists for recreational purposes of a human operator. In the age of increasing automation, it is designed to evoke the nostalgic feeling of digging through navigation menus, heap information records and "aha, so that's what the problem is" without leaving unnecessary guesswork afterwards.
 
-## (Almost) pauseless larger-than-disk live heap snapshots 
+## (Almost) pauseless live heap snapshots 
 
 _On Linux systems_, Dotheap supports _live_ heap snapshots.  
 It implements VM live migration style memory capture mechanism which replaces standard "request .NET application over IPC to suspend itself and (slowly) write the raw dump to disk" incompatible with production applications serving live traffic or just actively running.  
