@@ -17,15 +17,13 @@ struct ReadView<Content: View>: View {
     }
 }
 
-/// Shows a result that is computed once per snapshot in the background and kept, so coming back is instant.
+/// Shows a snapshot query and reuses its cached result.
 struct Computed<T, Content: View>: View {
     let snapshot: HeapSnapshot
     let key: String
     let label: String
     let compute: (HeapSnapshot) throws -> T
     let content: (T) -> Content
-    @State private var value: T?
-    @State private var error: String?
 
     init(_ snapshot: HeapSnapshot, key: String, label: String, compute: @escaping (HeapSnapshot) throws -> T, @ViewBuilder content: @escaping (T) -> Content) {
         self.snapshot = snapshot
@@ -33,20 +31,39 @@ struct Computed<T, Content: View>: View {
         self.label = label
         self.compute = compute
         self.content = content
-        _value = State(initialValue: snapshot.memoized(key))
+    }
+
+    var body: some View {
+        ComputedResult(input: self)
+            .id(key)
+            .id(ObjectIdentifier(snapshot))
+    }
+}
+
+private struct ComputedResult<T, Content: View>: View {
+    let input: Computed<T, Content>
+    @State private var value: T?
+    @State private var error: String?
+
+    init(input: Computed<T, Content>) {
+        self.input = input
+        _value = State(initialValue: input.snapshot.memoized(input.key))
     }
 
     var body: some View {
         if let value {
-            content(value)
+            input.content(value)
         } else if let error {
             Text(error).foregroundStyle(.red).textSelection(.enabled).padding()
         } else {
-            ProgressView(label).frame(maxWidth: .infinity, maxHeight: .infinity).task {
-                let s = snapshot, k = key, c = compute
+            ProgressView(input.label).frame(maxWidth: .infinity, maxHeight: .infinity).task {
+                let s = input.snapshot, k = input.key, c = input.compute
                 do {
-                    value = try await Task.detached { try s.memo(k) { try c(s) } }.value
+                    let result = try await Task.detached { try s.memo(k) { try c(s) } }.value
+                    try Task.checkCancellation()
+                    value = result
                 } catch {
+                    guard !Task.isCancelled else { return }
                     self.error = analysisErrorMessage(error)
                 }
             }

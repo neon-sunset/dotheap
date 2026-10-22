@@ -120,8 +120,15 @@ struct NativeOwnershipSection: View {
                 Computed(snapshot, key: "chunk samples \(g.id)", label: "Finding the largest chunks", compute: { _ in
                     try m.graph.largestChunks(g.chunks, limit: 500)
                 }) { chunks in
+                    let title = if g.chunks.count == 1 {
+                        "1 chunk"
+                    } else if chunks.count < g.chunks.count {
+                        "Largest \(chunks.count.formatted()) of \(g.chunks.count.formatted()) chunks"
+                    } else {
+                        "\(chunks.count.formatted()) chunks, largest first"
+                    }
                     List(selection: $session.selectedChunk) {
-                        SwiftUI.Section("\(g.chunks.count.formatted()) chunks, largest first") {
+                        SwiftUI.Section(title) {
                             ForEach(chunks, id: \.self) { c in
                                 let chunk = m.graph.chunks[Int(c)]
                                 HStack {
