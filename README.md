@@ -12,7 +12,7 @@ A lot of its heuristics are tied to specific implementation details of .NET's st
 ## Description
 
 So what is Dotheap?
-Dotheap is a mixed-mode heap snapshot analysis tool for .NET 10 applications which supports both standard (WKS/SVR) and [Satori](https://github.com/VSadov/Satori) GC families.
+Dotheap is a mixed-mode (managed + native) heap snapshot analysis tool for .NET 10 applications which supports both standard (WKS/SVR) and [Satori](https://github.com/VSadov/Satori) GC families.
 
 ![Memory ownership, async calls and ArrayPool findings in the demo application](docs/screenshots/overview.png)
 
