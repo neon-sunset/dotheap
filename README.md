@@ -34,7 +34,7 @@ Dotheap comes in two forms: CLI and Viewer application both using the shared `he
 
 The CLI runs on Linux, macOS and Windows. It is designed to be agent-friendly but even a human operator may find it useful, should the need arise.
 
-The Viewer is a native macOS application which mainly exists for recreational purposes of a human operator. In the age of increasing automation, it is designed to evoke the nostalgic feeling of digging through navigation menus, heap information records and "aha, so that's what the problem is" without leaving unnecessary guesswork afterwards.
+The Viewer is a native macOS application which mainly exists for recreational purposes of a human operator. In the age of increasing automation, it is designed to evoke a nostalgic feeling of digging through navigation menus, heap information records and "aha, so that's what the problem is" without leaving unnecessary guesswork afterwards.
 
 ## (Almost) pauseless live heap snapshots 
 
