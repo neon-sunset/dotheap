@@ -16,8 +16,7 @@ use std::{
 struct Metadata<'a> {
     format: u32,
     root_chunks: Cow<'a, BTreeSet<i32>>,
-    root_source: Cow<'a, BTreeMap<i32, String>>,
-    root_stack_slot: Cow<'a, BTreeMap<i32, (u64, i32)>>,
+    root_sources: Cow<'a, BTreeMap<i32, Vec<String>>>,
     texts: Cow<'a, BTreeMap<i32, String>>,
     tcache_chunks: usize,
     fastbin_chunks: usize,
@@ -58,7 +57,7 @@ impl NativeGraphData {
             .ok_or_else(|| Error::cache("no cache folder"))?;
         let bytes = fs::read(directory.join("manifest.json"))?;
         let metadata: Metadata<'_> = serde_json::from_slice(&bytes)?;
-        if metadata.format != 1 {
+        if metadata.format != 2 {
             return Err(Error::cache("unsupported native graph cache format"));
         }
         let states = [
@@ -126,8 +125,7 @@ impl NativeGraphData {
             chunk_dominator: store.open::<i32>("chunkDominator")?.to_vec(),
             first_words: store.open::<u64>("firstWords")?.to_vec(),
             root_chunks: metadata.root_chunks.into_owned(),
-            root_source: metadata.root_source.into_owned(),
-            root_stack_slot: metadata.root_stack_slot.into_owned(),
+            root_sources: metadata.root_sources.into_owned(),
             texts: metadata.texts.into_owned(),
             tcache_chunks: metadata.tcache_chunks,
             fastbin_chunks: metadata.fastbin_chunks,
@@ -179,10 +177,9 @@ impl NativeGraphData {
             &self.native_retained.values().copied().collect::<Vec<_>>(),
         )?;
         let metadata = Metadata {
-            format: 1,
+            format: 2,
             root_chunks: Cow::Borrowed(&self.root_chunks),
-            root_source: Cow::Borrowed(&self.root_source),
-            root_stack_slot: Cow::Borrowed(&self.root_stack_slot),
+            root_sources: Cow::Borrowed(&self.root_sources),
             texts: Cow::Borrowed(&self.texts),
             tcache_chunks: self.tcache_chunks,
             fastbin_chunks: self.fastbin_chunks,
@@ -283,8 +280,10 @@ mod tests {
             owned_chunks: BTreeMap::from([(0, vec![0, 3]), (1, vec![4])]),
             chunk_owners: BTreeMap::from([(0, vec![0]), (3, vec![0]), (4, vec![1])]),
             root_chunks: BTreeSet::from([0, 2]),
-            root_source: BTreeMap::from([(0, "library data".into()), (2, "thread stack".into())]),
-            root_stack_slot: BTreeMap::from([(2, (0xffff_ffff_f000, -7))]),
+            root_sources: BTreeMap::from([
+                (0, vec!["library data".into(), "thread stack".into()]),
+                (2, vec!["thread stack".into()]),
+            ]),
             managed_references: BTreeMap::from([(3, vec![1, 2])]),
             handle_references: BTreeMap::from([(4, vec![0x8000_0000_0000])]),
             native_retained: BTreeMap::from([(0, 64), (1, 32)]),

@@ -60,7 +60,7 @@ struct VerificationView: View {
                 ProgressView("Verifying heap integrity").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding(20)
+        .padding(PageInsets.content)
         .frame(minWidth: 760, idealWidth: 900, minHeight: 520, idealHeight: 650)
         .task(id: path) {
             result = nil

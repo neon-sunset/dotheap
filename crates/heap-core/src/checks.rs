@@ -7,7 +7,10 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -149,23 +152,59 @@ pub(crate) fn counted_names(
 
 impl HeapSnapshot {
     pub fn all_checks(&self) -> Result<Vec<Arc<CheckReport>>> {
-        Ok(vec![
-            self.verification_check()?,
-            Arc::new(self.async_analysis()?.report.clone()),
-            self.array_pool_check()?,
-            self.large_object_check()?,
-            self.cancellation_check()?,
-            self.event_check()?,
-            self.timer_check()?,
-            self.blocked_threads_check()?,
-            self.lock_check()?,
-            self.exceptions_check()?,
-            self.connections_check()?,
-            self.instance_count_check()?,
-            self.finalizer_backlog_check()?,
-            self.native_held_by_dead_check()?,
-            self.malloc_arena_check()?,
-        ])
+        let reports = self.memo("all checks", || {
+            type Check = fn(&HeapSnapshot) -> Result<Arc<CheckReport>>;
+            let checks: [Check; 15] = [
+                Self::verification_check,
+                Self::async_check,
+                Self::array_pool_check,
+                Self::large_object_check,
+                Self::cancellation_check,
+                Self::event_check,
+                Self::timer_check,
+                Self::blocked_threads_check,
+                Self::lock_check,
+                Self::exceptions_check,
+                Self::connections_check,
+                Self::instance_count_check,
+                Self::finalizer_backlog_check,
+                Self::native_held_by_dead_check,
+                Self::malloc_arena_check,
+            ];
+            let workers = std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+                .min(4);
+            let next = AtomicUsize::new(0);
+            // Keep checks outside Rayon's pool: waiting on a shared analysis must not block its nested parallel work.
+            let mut results = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..workers)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let mut results = Vec::new();
+                            loop {
+                                let index = next.fetch_add(1, Ordering::Relaxed);
+                                let Some(check) = checks.get(index) else {
+                                    break;
+                                };
+                                results.push((index, check(self)));
+                            }
+                            results
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            results.sort_by_key(|(index, _)| *index);
+            results
+                .into_iter()
+                .map(|(_, report)| report)
+                .collect::<Result<Vec<_>>>()
+        })?;
+        Ok(reports.as_ref().clone())
     }
 
     pub fn summary_findings(&self) -> Result<Arc<Vec<SummaryFinding>>> {
@@ -272,7 +311,7 @@ impl HeapSnapshot {
             });
             Ok(findings)
         };
-        self.saved("summary findings", compute)
+        self.saved("summary findings v4", compute)
     }
 
     pub fn field(&self, i: usize, name: &str) -> Option<FieldValue> {
@@ -281,7 +320,16 @@ impl HeapSnapshot {
             .find(|f| f.field.name == name)
     }
     pub fn target(&self, i: impl Into<Option<usize>>, name: &str) -> Option<usize> {
-        self.field(i.into()?, name)?.target
+        let i = i.into()?;
+        let fields = self.names.fields(self.heap.method_table(i).address);
+        let field = fields.iter().find(|f| f.name == name)?;
+        if !field.is_reference() || field.offset.checked_add(8)? as u64 > self.heap.size(i) {
+            return None;
+        }
+        self.heap.object_at(
+            self.dump
+                .u64(self.heap.addresses[i].checked_add(field.offset as u64)?)?,
+        )
     }
     pub fn integer_field(&self, f: Option<&FieldValue>) -> Option<i64> {
         let f = f?;
@@ -293,7 +341,20 @@ impl HeapSnapshot {
         }
     }
     pub fn integer(&self, i: impl Into<Option<usize>>, name: &str) -> Option<i64> {
-        self.integer_field(self.field(i.into()?, name).as_ref())
+        let i = i.into()?;
+        let fields = self.names.fields(self.heap.method_table(i).address);
+        let field = fields.iter().find(|f| f.name == name)?;
+        let size = field.primitive_size()?;
+        if field.offset.checked_add(size)? as u64 > self.heap.size(i) {
+            return None;
+        }
+        let address = self.heap.addresses[i].checked_add(field.offset as u64)?;
+        match size {
+            1 => self.dump.u8(address).map(i64::from),
+            2 => self.dump.u16(address).map(i64::from),
+            4 => self.dump.u32(address).map(|v| v as i32 as i64),
+            _ => self.dump.u64(address).map(|v| v as i64),
+        }
     }
     pub fn elements(&self, array: Option<usize>) -> Vec<Option<usize>> {
         array

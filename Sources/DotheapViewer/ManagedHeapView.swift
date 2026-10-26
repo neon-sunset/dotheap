@@ -97,13 +97,10 @@ struct ManagedHeapView: View {
     var body: some View {
         @Bindable var session = session
         VStack(spacing: 0) {
-            HStack {
-                Picker("View", selection: $session.heapView) { ForEach(HeapView.allCases) { Text($0.rawValue).tag($0) } }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
-                Spacer()
+            PageToolbar {
+                SegmentedPicker(title: "View", values: HeapView.allCases, selection: $session.heapView, label: \.rawValue)
+                    .fixedSize()
             }
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            Divider()
             switch session.heapView {
             case .statistics: HeapStatisticsView(snapshot: snapshot)
             case .map: HeapMapView(snapshot: snapshot)
@@ -170,7 +167,7 @@ struct HeapStatisticsView: View {
                     RegionStatsTable(stats: snapshot.sizeClassStats)
                 }
             }
-            .padding(20)
+            .padding(PageInsets.content)
         }
     }
 

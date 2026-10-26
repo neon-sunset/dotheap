@@ -31,6 +31,7 @@ mod network_report;
 mod object_checks;
 pub mod ownership;
 pub mod portable_pdb;
+mod progress;
 pub mod queries;
 mod resource_checks;
 pub mod runtime;

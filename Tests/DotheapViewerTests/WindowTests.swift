@@ -90,6 +90,41 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(b.backStack.count, 1)
     }
 
+    @MainActor func testInspectorHistoryKeepsNativeAndManagedSelectionsOnTheirPage() async throws {
+        _ = NSApplication.shared
+        let windows = ViewerWindows(), delegate = AppDelegate()
+        let view = window("native-allocations", windows: windows, delegate: delegate)
+        defer { close(view) }
+        let session = try await loaded(view, windows: windows)
+        session.section = .dominators
+        session.select(chunk: 0)
+        let nativeDeadline = ContinuousClock.now + .seconds(5)
+        while session.backStack.isEmpty && ContinuousClock.now < nativeDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let native = session.place
+        XCTAssertEqual(session.selectedChunk, 0)
+        XCTAssertNil(session.selectedObject)
+        XCTAssertTrue(session.showInspector)
+        session.select(object: 0)
+        let managedDeadline = ContinuousClock.now + .seconds(5)
+        while session.backStack.last?.inspectedObject != .chunk(0) && ContinuousClock.now < managedDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(session.selectedChunk)
+        XCTAssertEqual(session.section, .dominators)
+        session.back()
+        XCTAssertEqual(session.place, native)
+        XCTAssertEqual(session.inspectedObject, .chunk(0))
+        session.forward()
+        XCTAssertEqual(session.inspectedObject, .object(0))
+        XCTAssertEqual(session.section, .dominators)
+        session.section = .roots
+        session.show(.chunk(1), in: try XCTUnwrap(session.snapshot))
+        XCTAssertEqual(session.section, .roots)
+        XCTAssertEqual(session.inspectedObject, .chunk(1))
+    }
+
     @MainActor func testClosingAWindowReleasesItsSessionAndProtectsOtherCaches() async throws {
         _ = NSApplication.shared
         let windows = ViewerWindows(), delegate = AppDelegate()

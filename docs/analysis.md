@@ -43,6 +43,26 @@ Lengauer-Tarjan dominators identify the managed and native bytes reachable only 
 These are its retained bytes. Paths to roots can cross managed and native allocations. Retained
 size describes this detected graph; it does not predict an immediate reduction in RSS.
 
+The Viewer uses the same inspector for managed objects and native allocations. Links in Dominators,
+Roots and the inspector select either kind without changing the current page. Back and Forward
+restore the page and the inspected object. Dominators groups native children by identified type or
+referrer across sizes, with the library and attribution method kept distinct.
+
+Dominators shows the combined retained size. Parentheses show retained native memory for a managed
+object, or retained managed memory for a native allocation. Types also includes native memory in
+retained totals and instance ordering. Nested instances of the same type count their retained memory
+once in the type total.
+
+Settings controls how type names fit the available space: truncate, abbreviate namespaces, or wrap onto
+two lines. Names stay expanded when they fit; wrapping uses namespace and type boundaries. Full names
+remain available on hover and in object details.
+
+Roots lists direct references from the combined graph, including native stacks, registers, library
+data and mappings. Its managed and native byte counts are retained exclusively by each source.
+An allocation referenced by several sources can appear in several reference lists, while its retained
+bytes belong to their common dominator. Strong GC handles stored in native allocations remain attached
+to those allocations; the GC handles tab groups handles by kind and target type.
+
 ### Native pointer references
 
 Managed-to-native references come from field layouts: `nint`/`nuint` (`IntPtr`/`UIntPtr`), pointer
@@ -62,12 +82,34 @@ by the references that reach it:
 | Dead objects | Referenced only by dead managed objects; no pending finalizer remains for those owners. |
 | Unreferenced | No reference was found; a leak candidate. |
 
-A chunk is named by its C++ vtable class (from exported `_ZTV` symbols), the nearest referring C++
-object, or a referring managed object and field. Names help locate references; they do not establish
-ownership. Native matches can be stale or unrelated, and encoded pointers or missing layouts can
-hide references. The chunk
-inspector and CLI `possibleManagedReferences` list raw matches to managed object addresses. These
-matches do not add retention edges to the graph.
+The native allocation view groups chunks across sizes by identified type or reference source,
+library and reachability. Each chunk appears in one group. **Identified by** distinguishes a C++
+type found through its vtable (`_ZTV` symbols) from a referring C++ class, managed type and field,
+or native root. A reference source does not identify the allocation site or establish ownership.
+C++ referrer attribution stops at direct native roots and managed pointer fields. These provide
+a separate reference source, so a C++ type does not propagate through them into other allocations.
+Each distinct native root source contributes an edge, including sources that reference the same
+allocation. Shared allocations belong to their common dominator. A nearby stack frame does not
+identify an allocation's type or owner.
+Native matches can be stale or unrelated, and encoded pointers or missing layouts can hide references.
+
+Select a group to see its exact chunk sizes, counts and bytes. Select a size to filter the allocation
+list, or **All sizes** to clear the filter. The Viewer lists up to 500 chunks, largest first; a
+uniform-size list states the size shared by every chunk. Sizes include malloc headers and padding,
+so they can exceed the bytes originally requested by the application.
+
+Native Memory opens with Statistics, including malloc heaps and memory mappings. Allocations provides
+the groups and size distribution; its tables scroll within their panes. Selecting an allocation opens
+its details in the shared inspector. Following a reference leaves the group and size filter in place.
+
+In the CLI, `native <core>` lists group IDs. Use `native <core> --group <id>` for the size distribution
+and allocation addresses; add `--size <bytes>` to filter by size or `--limit 0` to list all rows.
+The chunk inspector and `chunk <core> <address>` show reference evidence, including pointers to
+chunk starts or interiors and any detected dominator. A dominator lies on every detected path
+from roots to that chunk. Native pointer matches remain conservative in either case.
+
+The inspector and CLI `possibleManagedReferences` also list raw matches to managed object addresses.
+These matches do not add retention edges to the graph.
 
 `finalizer-backlog` reports native memory reachable only through objects awaiting finalization.
 Their finalizers may release it; inspect whether earlier disposal could have released the resources.
@@ -319,7 +361,12 @@ Compressed input has two storage paths:
 - Larger or unsized frames, including ordinary `zstd` and systemd-coredump output, are decompressed
   once and stored as independently compressed 256 KiB blocks in the cache.
 
-Sequential scans can use reusable decompression buffers. Random reads can populate a temporary
-sparse file sized to the expanded dump. Nonzero pages are written on demand and remain available
+Sequential scans can use reusable decompression buffers. Random reads retain only the requested
+4 KiB pages in a temporary sparse file sized to the expanded dump. A bounded set of decoded blocks
+serves nearby reads. Nonzero pages are written on demand and remain available
 for the lifetime of the open dump; there is no fixed bound on the disk space they can occupy.
 See [Cache](../README.md#cache) for space requirements and cleanup commands.
+
+Findings run up to four independent checks concurrently. Checks share their analysis results;
+heap scans and async task reads can also use the Rayon pool. Cached async findings load separately
+from the detailed task graph.

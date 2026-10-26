@@ -53,7 +53,7 @@ struct HeapMapView: View {
                 Divider()
                 // Cells wrap to the window width; the slider only sets the cell size.
                 GeometryReader { geo in
-                    let columns = max(8, Int((geo.size.width - 28) / cell))
+                    let columns = max(8, Int((geo.size.width - 2 * PageInsets.content) / cell))
                     ScrollViewReader { proxy in
                         ScrollView(.vertical) {
                             let selectedPage = session.selectedRegion.flatMap(page(of:)), hoverPage = hoverRegion.flatMap(page(of:))
@@ -68,7 +68,7 @@ struct HeapMapView: View {
                                     }
                                 }
                             }
-                            .padding(14)
+                            .padding(PageInsets.content)
                         }
                         // A region opened from elsewhere: bring its page into view.
                         .onChange(of: session.selectedRegion, initial: true) {
@@ -132,7 +132,7 @@ struct HeapMapView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
+        .padding(.horizontal, PageInsets.content).padding(.vertical, 8)
     }
 
     private func legend(_ items: [(String, Color)]) -> some View { ColorLegend(items: items) }
@@ -158,7 +158,7 @@ struct HeapMapView: View {
             }
             Spacer()
         }
-        .padding(.horizontal, 14).padding(.vertical, 6)
+        .padding(.horizontal, PageInsets.content).padding(.vertical, 6)
     }
 }
 

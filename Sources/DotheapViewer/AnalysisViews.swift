@@ -1,7 +1,6 @@
 import HeapCore
 import SwiftUI
 
-/// Memory the dump records, by kind, without smaps.
 struct NativeMemoryView: View {
     @Environment(Session.self) private var session
     let snapshot: HeapSnapshot
@@ -9,32 +8,41 @@ struct NativeMemoryView: View {
     @State private var heapOrder: TableSort? = TableSort(column: "In use", ascending: false)
     @State private var mappingOrder: TableSort? = TableSort(column: "Start", ascending: true)
 
+    enum Mode: String, CaseIterable {
+        case overview = "Statistics", allocations = "Allocations"
+    }
+
     var body: some View {
+        @Bindable var session = session
+        let modes = Mode.allCases.filter { !snapshot.native.mallocHeaps.isEmpty || $0 != .allocations }
+        let mode = modes.contains(session.nativeMode) ? session.nativeMode : .overview
+        VStack(spacing: 0) {
+            PageToolbar {
+                SegmentedPicker(title: "View", values: modes,
+                                selection: Binding(get: { mode }, set: { session.nativeMode = $0 }), label: \.rawValue)
+                    .fixedSize()
+            }
+            switch mode {
+            case .overview: statistics
+            case .allocations:
+                NativeOwnershipSection(snapshot: snapshot)
+                    .padding(.horizontal, PageInsets.content).padding(.top, 8).padding(.bottom, PageInsets.content)
+            }
+        }
+    }
+
+    private var statistics: some View {
         let native = snapshot.native
         let categories = native.categories
         let heaps = native.mallocHeaps
-        let mappings = filter.isEmpty ? AnyRandomAccessCollection(native.mappings)
-            : AnyRandomAccessCollection(native.mappings.filter { $0.category.localizedCaseInsensitiveContains(filter) || $0.detail.localizedCaseInsensitiveContains(filter) })
         let residency = snapshot.agreeingResidency
-        ScrollViewReader { proxy in
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if let residency {
-                    Text("Readable mapped memory in the dump, and the part of it that is resident per smaps, by what it holds.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    let byKind = Dictionary(grouping: native.mappings, by: \.category)
-                    let rss = byKind.mapValues { $0.reduce(0) { $0 + (residency.rss[$1.start] ?? 0) } }
-                    // Bytes with data in the dump beyond the resident ones, per mapping.
-                    let missing = byKind.mapValues { $0.reduce(UInt64(0)) { t, m in let r = residency.rss[m.start] ?? 0; return t + (m.nonZeroBytes > r ? m.nonZeroBytes - r : 0) } }
-                    KindBars(rows: categories.map { ($0.name, $0.bytes, rss[$0.name] ?? 0, missing[$0.name] ?? 0) }, resident: true)
-                } else {
-                    Text(snapshot.smaps == nil ? "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. Add smaps for residency."
-                         : "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. The smaps file does not match the dump, so it is not used here.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    KindBars(rows: categories.map { ($0.name, $0.bytes, 0, 0) }, resident: false)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(snapshot.dump.platform.rawValue + (native.glibcVersion.map { ", glibc \($0) malloc" } ?? ", native memory")).font(.headline)
+                    Text("Mapped memory and native allocations captured in the dump.").font(.caption).foregroundStyle(.secondary)
                 }
                 if !heaps.isEmpty {
-                    Text("glibc " + (native.glibcVersion.map { $0 + " " } ?? "") + "malloc").font(.title3.weight(.semibold))
                     MetricRow {
                         Metric(title: "In use", value: Format.mb(heaps.reduce(0) { $0 + $1.inUseBytes }), detail: "\(heaps.reduce(0) { $0 + $1.inUseChunks }.formatted()) chunks", color: Palette.live)
                         Metric(title: "Free chunks", value: Format.mb(heaps.reduce(0) { $0 + $1.freeResident }), detail: "resident, of \(Format.mb(heaps.reduce(0) { $0 + $1.freeBytes })) in \(heaps.reduce(0) { $0 + $1.freeChunks }.formatted()) chunks", color: Palette.free)
@@ -42,48 +50,96 @@ struct NativeMemoryView: View {
                         Metric(title: "malloc_trim(0) would free", value: Format.mb(heaps.reduce(0) { $0 + $1.trimReleasable }), detail: "free chunk pages; main arena top")
                         Metric(title: "Arenas", value: "\(Set(heaps.map(\.arena)).count)", detail: "\(heaps.count) heaps")
                     }
-                    NativeOwnershipSection(snapshot: snapshot).id("ownership")
-                    Text("glibc malloc heaps").font(.headline).padding(.top, 8)
-                    TextTable(rows: heaps, columns: [
-                        .init("Heap", width: 130, font: .monospaced, value: \.start, text: { Format.hex($0.start) }),
-                        .init("Arena", width: 90, flexible: true, value: \.arenaName, text: \.arenaName),
-                        .init("Size", width: 80, font: .digits, value: \.size, text: { Format.mb($0.size) }),
-                    ] + (residency == nil ? [] : [
-                        .init("Resident", width: 80, font: .digits, value: { snapshot.resident(from: $0.start, to: $0.end) ?? 0 },
-                              text: { Format.mb(snapshot.resident(from: $0.start, to: $0.end) ?? 0) }, help: { _ in "RSS of the heap's pages per smaps" }),
-                    ]) + [
-                        .init("In use", width: 80, font: .digits, value: \.inUseBytes, text: { Format.mb($0.inUseBytes) }),
-                        .init("Free", width: 80, font: .digits, value: \.freeBytes, text: { Format.mb($0.freeBytes) }),
-                        .init("Free, resident", width: 90, font: .digits, value: \.freeResident, text: { Format.mb($0.freeResident) }),
-                        .init("Trim would free", width: 90, font: .digits, value: \.trimReleasable, text: { Format.mb($0.trimReleasable) }),
-                        .init("Largest free", width: 90, font: .digits, value: \.largestFree, text: { Format.bytes($0.largestFree) }),
-                        .init("Top chunk", width: 90, font: .digits, value: \.topBytes, text: { Format.mb($0.topBytes) }),
-                        .init("Chunks in use", width: 100, font: .digits, value: \.inUseChunks, text: { $0.inUseChunks.formatted() }),
-                        .init("Free chunks", width: 90, font: .digits, value: \.freeChunks, text: { $0.freeChunks.formatted() }),
-                    ], sort: $heapOrder)
-                    .frame(minHeight: 240)
                 }
-                Text("Mappings").font(.title3.weight(.semibold))
-                TextField("Filter by kind or detail", text: $filter).textFieldStyle(.roundedBorder).frame(maxWidth: 320)
-                TextTable(rows: mappings, columns: [
-                    .init("Start", width: 130, font: .monospaced, value: \.start, text: { Format.hex($0.start) }),
-                    .init("Size", width: 80, font: .digits, value: \.size, text: { Format.bytes($0.size) }),
-                    .init("Kind", width: 200, minWidth: 140, value: \.category, text: \.category),
-                    .init("Detail", width: 300, flexible: true, value: \.detail, text: \.detail, color: { _ in .secondaryLabelColor }, help: { $0.detail }),
-                    .init("Access", width: 50, value: \.access, text: \.access, color: { _ in .secondaryLabelColor }),
-                ] + (residency.map { r in [
-                    .init("Resident", width: 80, font: .digits, value: { r.rss[$0.start] ?? 0 }, text: { Format.bytes(r.rss[$0.start] ?? 0) }),
-                    .init("Swap", width: 70, font: .digits, value: { r.swap[$0.start] ?? 0 }, text: { Format.bytes(r.swap[$0.start] ?? 0) }),
-                ] } ?? []), sort: $mappingOrder)
-                .frame(minHeight: 320)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("By mapping kind").font(.title2.weight(.semibold))
+                    if let residency {
+                        Text("Readable mapped memory in the dump, and the part of it that is resident per smaps, by what it holds.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        let byKind = Dictionary(grouping: native.mappings, by: \.category)
+                        let rss = byKind.mapValues { $0.reduce(0) { $0 + (residency.rss[$1.start] ?? 0) } }
+                        // Bytes with data in the dump beyond the resident ones, per mapping.
+                        let missing = byKind.mapValues { $0.reduce(UInt64(0)) { t, m in let r = residency.rss[m.start] ?? 0; return t + (m.nonZeroBytes > r ? m.nonZeroBytes - r : 0) } }
+                        KindBars(rows: categories.map { ($0.name, $0.bytes, rss[$0.name] ?? 0, missing[$0.name] ?? 0) }, resident: true)
+                    } else {
+                        Text(snapshot.smaps == nil ? "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. Add smaps for residency."
+                             : "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. The smaps file does not match the dump, so it is not used here.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        KindBars(rows: categories.map { ($0.name, $0.bytes, 0, 0) }, resident: false)
+                    }
+                }
+                if !heaps.isEmpty {
+                    Computed(snapshot, key: "nativeOwnership", label: "Reading native allocations", compute: { try NativeOwnershipSection.Model($0) }) { model in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Reachability of malloc allocations").font(.title2.weight(.semibold))
+                            MetricRow {
+                                ForEach(model.totals, id: \.reach) { total in
+                                    Metric(title: total.reach.title, value: Format.bytes(total.bytes), detail: "\(total.chunks.formatted()) chunks")
+                                }
+                                Metric(title: "Freed, cached by glibc", value: (model.graph.tcacheChunks + model.graph.fastbinChunks).formatted(), detail: "tcache and fastbin chunks")
+                            }
+                        }
+                    }
+                    Text("Managed references come from pointer fields and array elements. Native memory, stacks and registers are scanned conservatively; matching values can be stale or unrelated. Freed tcache and fastbin chunks are excluded. Native roots take priority when both native and managed references exist. Missing layouts and encoded pointers can hide references; unreferenced chunks are leak candidates.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if !heaps.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Malloc heaps").font(.title2.weight(.semibold))
+                        heapTable.frame(height: min(400, CGFloat(heaps.count) * 22 + 42))
+                    }
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Memory mappings").font(.title2.weight(.semibold))
+                        Spacer()
+                        TextField("Filter by kind or detail", text: $filter).textFieldStyle(.roundedBorder).frame(maxWidth: 320)
+                    }
+                    mappingTable.frame(height: 360)
+                }
             }
-            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(PageInsets.content)
         }
-        // A chunk group opened from search: bring the ownership section into view.
-        .onChange(of: session.selectedChunkGroup, initial: true) {
-            if session.selectedChunkGroup != nil { proxy.scrollTo("ownership", anchor: .top) }
-        }
-        }
+    }
+
+    private var heapTable: some View {
+        let heaps = snapshot.native.mallocHeaps
+        let residency = snapshot.agreeingResidency
+        return TextTable(rows: heaps, columns: [
+            .init("Heap", width: 130, font: .monospaced, value: \.start, text: { Format.hex($0.start) }),
+            .init("Arena", width: 90, flexible: true, value: \.arenaName, text: \.arenaName),
+            .init("Size", width: 80, font: .digits, value: \.size, text: { Format.mb($0.size) }),
+        ] + (residency == nil ? [] : [
+            .init("Resident", width: 80, font: .digits, value: { snapshot.resident(from: $0.start, to: $0.end) ?? 0 },
+                  text: { Format.mb(snapshot.resident(from: $0.start, to: $0.end) ?? 0) }, help: { _ in "RSS of the heap's pages per smaps" }),
+        ]) + [
+            .init("In use", width: 80, font: .digits, value: \.inUseBytes, text: { Format.mb($0.inUseBytes) }),
+            .init("Free", width: 80, font: .digits, value: \.freeBytes, text: { Format.mb($0.freeBytes) }),
+            .init("Free, resident", width: 90, font: .digits, value: \.freeResident, text: { Format.mb($0.freeResident) }),
+            .init("Trim would free", width: 90, font: .digits, value: \.trimReleasable, text: { Format.mb($0.trimReleasable) }),
+            .init("Largest free", width: 90, font: .digits, value: \.largestFree, text: { Format.bytes($0.largestFree) }),
+            .init("Top chunk", width: 90, font: .digits, value: \.topBytes, text: { Format.mb($0.topBytes) }),
+            .init("Chunks in use", width: 100, font: .digits, value: \.inUseChunks, text: { $0.inUseChunks.formatted() }),
+            .init("Free chunks", width: 90, font: .digits, value: \.freeChunks, text: { $0.freeChunks.formatted() }),
+        ], sort: $heapOrder)
+    }
+
+    private var mappingTable: some View {
+        let native = snapshot.native
+        let residency = snapshot.agreeingResidency
+        let mappings = filter.isEmpty ? AnyRandomAccessCollection(native.mappings)
+            : AnyRandomAccessCollection(native.mappings.filter { $0.category.localizedCaseInsensitiveContains(filter) || $0.detail.localizedCaseInsensitiveContains(filter) })
+        return TextTable(rows: mappings, columns: [
+            .init("Start", width: 130, font: .monospaced, value: \.start, text: { Format.hex($0.start) }),
+            .init("Size", width: 80, font: .digits, value: \.size, text: { Format.bytes($0.size) }),
+            .init("Kind", width: 200, minWidth: 140, value: \.category, text: \.category),
+            .init("Detail", width: 300, flexible: true, value: \.detail, text: \.detail, color: { _ in .secondaryLabelColor }, help: { $0.detail }),
+            .init("Access", width: 50, value: \.access, text: \.access, color: { _ in .secondaryLabelColor }),
+        ] + (residency.map { r in [
+            .init("Resident", width: 80, font: .digits, value: { r.rss[$0.start] ?? 0 }, text: { Format.bytes(r.rss[$0.start] ?? 0) }),
+            .init("Swap", width: 70, font: .digits, value: { r.swap[$0.start] ?? 0 }, text: { Format.bytes(r.swap[$0.start] ?? 0) }),
+        ] } ?? []), sort: $mappingOrder)
     }
 }
 
@@ -179,7 +235,7 @@ struct GarbageView: View {
                         .init("Garbage held", width: 110, font: .digits, value: \.retained, text: { Format.bytes($0.retained) }),
                     ], sort: $order, selection: selected, select: { selected = $0 })
                 }
-                .padding(12)
+                .padding(PageInsets.content)
             } second: {
                 if let key = selected, let group = groups.first(where: { $0.id == key }) {
                     SampleList(snapshot: snapshot, title: "Largest " + TypeNames.short(group.type), samples: group.samples) { "holds " + Format.bytes(g.retained($0)) }
@@ -359,7 +415,7 @@ struct FragmentationView: View {
                             .init("Regions", width: 65, font: .digits, value: \.regionCount, text: { $0.regionCount.formatted() }),
                         ], sort: $order, selection: contributor, select: { contributor = $0 })
                     }
-                    .padding(12)
+                    .padding(PageInsets.content)
                 } second: {
                     if let key = contributor, let c = rows.first(where: { $0.id == key }) {
                         ContributorDetail(snapshot: snapshot, contributor: c)
@@ -386,7 +442,7 @@ struct FragmentationView: View {
                             Gen2ByHeap(heaps: report.gen2ByHeap)
                         }
                     }
-                    .padding(12)
+                    .padding(PageInsets.content)
                 } second: {
                     if let r = report.reasons.first(where: { $0.name == reason }) {
                         List(r.regionIndices.prefix(500), id: \.self) { k in
@@ -466,7 +522,7 @@ struct ContributorDetail: View {
             if contributor.samples.isEmpty { Text("No objects").foregroundStyle(.secondary) }
             ForEach(contributor.samples, id: \.self) { ObjectLink(snapshot: snapshot, object: $0) }
         }
-        .padding(10)
+        .padding(PageInsets.detail)
     }
 }
 

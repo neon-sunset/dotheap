@@ -96,6 +96,23 @@ impl TypeNames {
         folders: &[PathBuf],
         method_tables: impl IntoIterator<Item = u64>,
     ) -> Self {
+        Self::new_with_progress(
+            dump,
+            free,
+            folders,
+            method_tables,
+            crate::progress::Progress::none(),
+        )
+    }
+
+    pub(crate) fn new_with_progress(
+        dump: Arc<CoreDump>,
+        free: u64,
+        folders: &[PathBuf],
+        method_tables: impl IntoIterator<Item = u64>,
+        progress: crate::progress::Progress<'_>,
+    ) -> Self {
+        progress.report(0.0);
         let (mut dlls, mut pdb_files) = (HashMap::new(), HashMap::new());
         for folder in folders {
             let mut pending = vec![folder.clone()];
@@ -149,7 +166,9 @@ impl TypeNames {
             ranges.sort_by_key(|&(a, b)| std::cmp::Reverse(b - a));
         }
         let mut known: BTreeSet<_> = method_tables.into_iter().collect();
-        for mt in known.clone() {
+        let count = known.len();
+        for (i, mt) in known.clone().into_iter().enumerate() {
+            progress.items(i, count);
             if dump.u32(mt).is_some_and(|f| f & 0x80000 != 0)
                 && let Some(element) = dump
                     .u64(mt.wrapping_add(48))
@@ -158,6 +177,7 @@ impl TypeNames {
                 known.insert(element);
             }
         }
+        progress.report(1.0);
         Self {
             resolver: Mutex::new(Resolver {
                 dump,
@@ -288,10 +308,18 @@ impl TypeNames {
         &self,
         descriptor: Option<&ContractDescriptor>,
     ) -> HashMap<u64, String> {
+        self.static_field_slots_with_progress(descriptor, crate::progress::Progress::none())
+    }
+
+    pub(crate) fn static_field_slots_with_progress(
+        &self,
+        descriptor: Option<&ContractDescriptor>,
+        progress: crate::progress::Progress<'_>,
+    ) -> HashMap<u64, String> {
         self.resolver
             .lock()
             .unwrap()
-            .static_field_slots(descriptor)
+            .static_field_slots(descriptor, progress)
             .unwrap_or_default()
     }
 }
@@ -711,6 +739,7 @@ impl Resolver {
     fn static_field_slots(
         &mut self,
         descriptor: Option<&ContractDescriptor>,
+        progress: crate::progress::Progress<'_>,
     ) -> Option<HashMap<u64, String>> {
         let d = descriptor?;
         let (dsi, aux, gc_statics, type_map, static_count) = (
@@ -732,7 +761,9 @@ impl Resolver {
             .filter_map(|mt| self.dump.u64(mt.wrapping_add(24)))
             .filter(|&m| m != 0)
             .collect();
-        for module in modules {
+        let count = modules.len();
+        for (index, module) in modules.into_iter().enumerate() {
+            progress.portion(0.0, 0.25).items(index, count);
             let Some(mut map) = module.checked_add(type_map) else {
                 continue;
             };
@@ -774,7 +805,11 @@ impl Resolver {
             }
         }
         let mut slots = HashMap::new();
-        for mt in tables {
+        let count = tables.len();
+        for (index, mt) in tables.into_iter().enumerate() {
+            if index % 32 == 0 {
+                progress.portion(0.25, 1.0).items(index, count);
+            }
             let fields = (|| {
                 if self.dump.u32(mt.checked_add(8)?)? & 2 == 0 {
                     return None;
@@ -833,6 +868,7 @@ impl Resolver {
                 }
             }
         }
+        progress.report(1.0);
         Some(slots)
     }
     fn pdb(&mut self, name: &str, metadata: &AssemblyMetadata) -> Option<Arc<PortablePdb>> {

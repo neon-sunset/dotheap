@@ -288,7 +288,7 @@ private struct SocketDetail: View {
                 }
                 RootPath(snapshot: snapshot, object: s.ownerObject ?? s.object, avoiding: HeapSnapshot.socketEngineTypes, avoidingText: "the socket engines")
             }
-            .padding(10)
+            .padding(PageInsets.detail)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

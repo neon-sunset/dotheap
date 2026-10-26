@@ -419,6 +419,23 @@ impl HeapSnapshot {
                 .collect())
         })
     }
+    pub fn statics_arrays_with_progress(
+        &self,
+        progress: impl Fn(f64) + Sync,
+    ) -> Result<Arc<HashSet<usize>>> {
+        let update = |_: &str, fraction| progress(fraction);
+        let progress = crate::progress::Progress::new(&update);
+        progress.report(0.0);
+        self.memo("staticFieldSlots", || {
+            Ok(self.names.static_field_slots_with_progress(
+                self.runtime.as_ref().and_then(|r| r.descriptor.as_ref()),
+                progress,
+            ))
+        })?;
+        let arrays = self.statics_arrays()?;
+        progress.report(1.0);
+        Ok(arrays)
+    }
     pub fn reference_name(&self, parent: usize, child: usize) -> Result<Option<String>> {
         let start = self.heap.addresses[parent];
         let size = self.heap.size(parent);

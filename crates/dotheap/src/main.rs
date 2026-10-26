@@ -145,9 +145,7 @@ fn run() -> Result<u8, CliError> {
         CacheChoice::Automatic
     };
     let started = Instant::now();
-    let phase = std::cell::RefCell::new(String::new());
-    let phase_start = std::cell::Cell::new(started);
-    let announced = std::cell::Cell::new(false);
+    let status = std::sync::Mutex::new((String::new(), started, false));
     let opened = HeapSnapshot::open(
         Path::new(&arguments.core),
         arguments.dlls.iter().map(PathBuf::from).collect(),
@@ -157,21 +155,17 @@ fn run() -> Result<u8, CliError> {
         },
         cache.clone(),
         |name, _| {
-            let mut phase = phase.borrow_mut();
+            let mut status = status.lock().unwrap();
+            let (phase, phase_start, announced) = &mut *status;
             if name == *phase {
                 return;
             }
             if arguments.flag("--progress") {
                 if !phase.is_empty() {
-                    eprintln!(
-                        "{phase}: {:.1} s",
-                        phase_start.get().elapsed().as_secs_f64()
-                    );
+                    eprintln!("{phase}: {:.1} s", phase_start.elapsed().as_secs_f64());
                 }
-            } else if !announced.get()
-                && ["Walking the heap", "Reading the .zst dump"].contains(&name)
-            {
-                announced.set(true);
+            } else if !*announced && ["Walking the heap", "Reading the .zst dump"].contains(&name) {
+                *announced = true;
                 eprintln!(
                     "dotheap: processing the dump; {}",
                     if cache == CacheChoice::None {
@@ -182,7 +176,7 @@ fn run() -> Result<u8, CliError> {
                 );
             }
             *phase = name.into();
-            phase_start.set(Instant::now());
+            *phase_start = Instant::now();
         },
     );
     let snapshot = match opened {
@@ -206,7 +200,7 @@ fn run() -> Result<u8, CliError> {
         }
         Err(error) => return Err(error.into()),
     };
-    if arguments.flag("--progress") || announced.get() {
+    if arguments.flag("--progress") || status.lock().unwrap().2 {
         eprintln!(
             "dotheap: opened in {:.1} s{}",
             started.elapsed().as_secs_f64(),

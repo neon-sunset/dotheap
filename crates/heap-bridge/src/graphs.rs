@@ -4,8 +4,11 @@ use crate::{
     types::Index,
 };
 use heap_core::{
-    analysis::HeapSnapshot, garbage::GarbageGraph, native_graph::NativeGraph,
-    ownership::OwnershipGraph, thread_stacks::ThreadStacks,
+    analysis::HeapSnapshot,
+    garbage::GarbageGraph,
+    native_graph::{ChunkAttribution, ChunkSizeGroup, NativeGraph},
+    ownership::{OwnershipGraph, OwnershipRoot},
+    thread_stacks::ThreadStacks,
 };
 use std::sync::Arc;
 
@@ -23,7 +26,7 @@ pub struct NativeChunkInfo {
     pub class_name: Option<String>,
     pub library: Option<String>,
     pub owner: Option<Index>,
-    pub root_source: Option<String>,
+    pub root_sources: Vec<String>,
     pub pointers: Vec<i32>,
     pub referrers: Vec<i32>,
     pub owners: Vec<Index>,
@@ -133,7 +136,12 @@ impl NativeGraphView {
             class_name: self.graph.class_name(index),
             library: self.graph.library(index),
             owner: self.graph.owning_object(index),
-            root_source: self.graph.root_source.get(&key).cloned(),
+            root_sources: self
+                .graph
+                .root_sources
+                .get(&key)
+                .cloned()
+                .unwrap_or_default(),
             pointers: self.graph.pointers(index).to_vec(),
             referrers: self.graph.referrers(index).to_vec(),
             owners: self
@@ -173,8 +181,31 @@ impl NativeGraphView {
         self.graph.root_chunks.contains(&chunk)
     }
 
-    pub fn largest_chunks(&self, chunks: &[i32], limit: Index) -> Result<Vec<i32>> {
-        Ok(self.graph.largest_chunks(chunks, limit)?)
+    pub fn largest_chunks(&self, chunks: &[i32], size: u64, limit: Index) -> Result<Vec<i32>> {
+        Ok(self
+            .graph
+            .largest_chunks(chunks, (size != 0).then_some(size), limit)?)
+    }
+
+    pub fn chunk_sizes(&self, chunks: &[i32]) -> Result<Vec<ChunkSizeGroup>> {
+        Ok(self.graph.chunk_sizes(chunks)?)
+    }
+
+    pub fn attribution(&self, chunk: Index) -> Result<ChunkAttribution> {
+        if chunk >= self.graph.chunks.len() {
+            return Err(AnalysisError::Failed {
+                message: "Chunk index is out of range".into(),
+            });
+        }
+        let result = self.graph.attribution(chunk, &self.snapshot);
+        self.snapshot.dump.check()?;
+        Ok(result?)
+    }
+
+    pub fn pointer_is_exact(&self, source: Index, target: Index) -> bool {
+        source < self.graph.chunks.len()
+            && target < self.graph.chunks.len()
+            && self.graph.pointer_is_exact(source, target)
     }
 
     pub fn native_retained(&self, object: Index) -> u64 {
@@ -216,6 +247,14 @@ impl NativeGraphView {
 }
 
 impl OwnershipView {
+    pub fn roots(&self) -> Vec<OwnershipRoot> {
+        self.graph.roots()
+    }
+
+    pub fn root_references(&self, node: Index) -> &[i32] {
+        self.graph.root_references(node)
+    }
+
     pub fn info(&self) -> OwnershipInfo {
         OwnershipInfo {
             count: self.graph.count,

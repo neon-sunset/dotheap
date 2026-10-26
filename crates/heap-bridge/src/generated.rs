@@ -278,8 +278,82 @@ pub unsafe extern "C" fn dh_Chunk_state(pointer: *const c_void) -> *const c_void
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkAttribution_kind(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<ChunkAttribution>()).kind as *const ChunkAttributionKind).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkAttribution_label(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<ChunkAttribution>()).label as *const String).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkAttribution_library(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<ChunkAttribution>()).library as *const Option<String>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Option_String(pointer: *const c_void) -> *const c_void {
+    unsafe {
+        (&*pointer.cast::<Option<String>>())
+            .as_ref()
+            .map_or(std::ptr::null(), |v| (v as *const String).cast())
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkAttribution_source_chunk(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<ChunkAttribution>()).source_chunk as *const Option<usize>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Option_usize(pointer: *const c_void) -> *const c_void {
+    unsafe {
+        (&*pointer.cast::<Option<usize>>())
+            .as_ref()
+            .map_or(std::ptr::null(), |v| (v as *const usize).cast())
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkAttribution_source_object(
+    pointer: *const c_void,
+) -> *const c_void {
+    unsafe { (&(*pointer.cast::<ChunkAttribution>()).source_object as *const Option<usize>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_tag_ChunkAttributionKind(pointer: *const c_void) -> u32 {
+    unsafe {
+        match &*pointer.cast::<ChunkAttributionKind>() {
+            ChunkAttributionKind::CppType => 0,
+            ChunkAttributionKind::CppDominator => 1,
+            ChunkAttributionKind::CppReferrer => 2,
+            ChunkAttributionKind::CppInteriorReferrer => 3,
+            ChunkAttributionKind::ManagedDominator => 4,
+            ChunkAttributionKind::ManagedReferrer => 5,
+            ChunkAttributionKind::NativeRoot => 6,
+            ChunkAttributionKind::Symbol => 7,
+            ChunkAttributionKind::Library => 8,
+            ChunkAttributionKind::Text => 9,
+            ChunkAttributionKind::Unknown => 10,
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkGroup_id(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<ChunkGroup>()).id as *const String).cast() }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_ChunkGroup_label(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<ChunkGroup>()).label as *const String).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkGroup_kind(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<ChunkGroup>()).kind as *const ChunkAttributionKind).cast() }
 }
 
 #[unsafe(no_mangle)]
@@ -290,15 +364,6 @@ pub unsafe extern "C" fn dh_ChunkGroup_reach(pointer: *const c_void) -> *const c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_ChunkGroup_library(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<ChunkGroup>()).library as *const Option<String>).cast() }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dh_read_Option_String(pointer: *const c_void) -> *const c_void {
-    unsafe {
-        (&*pointer.cast::<Option<String>>())
-            .as_ref()
-            .map_or(std::ptr::null(), |v| (v as *const String).cast())
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -314,6 +379,16 @@ pub unsafe extern "C" fn dh_read_Vec_i32(pointer: *const c_void) -> Slice {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_ChunkGroup_bytes(pointer: *const c_void) -> u64 {
     unsafe { (*pointer.cast::<ChunkGroup>()).bytes }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkGroup_min_size(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<ChunkGroup>()).min_size }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_ChunkGroup_max_size(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<ChunkGroup>()).max_size }
 }
 
 #[unsafe(no_mangle)]
@@ -564,15 +639,6 @@ pub unsafe extern "C" fn dh_FieldValue_display(pointer: *const c_void) -> *const
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_FieldValue_target(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<FieldValue>()).target as *const Option<usize>).cast() }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dh_read_Option_usize(pointer: *const c_void) -> *const c_void {
-    unsafe {
-        (&*pointer.cast::<Option<usize>>())
-            .as_ref()
-            .map_or(std::ptr::null(), |v| (v as *const usize).cast())
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -1137,8 +1203,8 @@ pub unsafe extern "C" fn dh_NativeChunkInfo_owner(pointer: *const c_void) -> *co
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dh_NativeChunkInfo_root_source(pointer: *const c_void) -> *const c_void {
-    unsafe { (&(*pointer.cast::<NativeChunkInfo>()).root_source as *const Option<String>).cast() }
+pub unsafe extern "C" fn dh_NativeChunkInfo_root_sources(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<NativeChunkInfo>()).root_sources as *const Vec<String>).cast() }
 }
 
 #[unsafe(no_mangle)]
@@ -1628,6 +1694,31 @@ pub unsafe extern "C" fn dh_OwnershipGroup_name(pointer: *const c_void) -> *cons
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipGroup_kind(pointer: *const c_void) -> *const c_void {
+    unsafe {
+        (&(*pointer.cast::<OwnershipGroup>()).kind as *const Option<ChunkAttributionKind>).cast()
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Option_ChunkAttributionKind(
+    pointer: *const c_void,
+) -> *const c_void {
+    unsafe {
+        (&*pointer.cast::<Option<ChunkAttributionKind>>())
+            .as_ref()
+            .map_or(std::ptr::null(), |v| {
+                (v as *const ChunkAttributionKind).cast()
+            })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipGroup_library(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnershipGroup>()).library as *const Option<String>).cast() }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_OwnershipGroup_nodes(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<OwnershipGroup>()).nodes as *const Vec<usize>).cast() }
 }
@@ -1690,6 +1781,70 @@ pub unsafe extern "C" fn dh_tag_OwnershipNode(pointer: *const c_void) -> u32 {
             OwnershipNode::Chunk(..) => 3,
         }
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipRoot_node(pointer: *const c_void) -> usize {
+    unsafe { (*pointer.cast::<OwnershipRoot>()).node }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipRoot_name(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnershipRoot>()).name as *const String).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipRoot_objects(pointer: *const c_void) -> usize {
+    unsafe { (*pointer.cast::<OwnershipRoot>()).objects }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipRoot_chunks(pointer: *const c_void) -> usize {
+    unsafe { (*pointer.cast::<OwnershipRoot>()).chunks }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipRoot_managed(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<OwnershipRoot>()).managed }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipRoot_native(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<OwnershipRoot>()).native }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipTypeGroup_name(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnershipTypeGroup>()).name as *const String).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipTypeGroup_type_id(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnershipTypeGroup>()).type_id as *const Option<u32>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Option_u32(pointer: *const c_void) -> *const c_void {
+    unsafe {
+        (&*pointer.cast::<Option<u32>>())
+            .as_ref()
+            .map_or(std::ptr::null(), |v| (v as *const u32).cast())
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipTypeGroup_objects(pointer: *const c_void) -> usize {
+    unsafe { (*pointer.cast::<OwnershipTypeGroup>()).objects }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipTypeGroup_bytes(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<OwnershipTypeGroup>()).bytes }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipTypeGroup_nodes(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnershipTypeGroup>()).nodes as *const Vec<usize>).cast() }
 }
 
 #[unsafe(no_mangle)]
@@ -3251,15 +3406,6 @@ pub unsafe extern "C" fn dh_TimerInfo_due_time(pointer: *const c_void) -> *const
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dh_read_Option_u32(pointer: *const c_void) -> *const c_void {
-    unsafe {
-        (&*pointer.cast::<Option<u32>>())
-            .as_ref()
-            .map_or(std::ptr::null(), |v| (v as *const u32).cast())
-    }
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_TimerInfo_period(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<TimerInfo>()).period as *const Option<u32>).cast() }
 }
@@ -3536,8 +3682,21 @@ pub unsafe extern "C" fn dh_Snapshot_open(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dh_Snapshot_info(pointer: *const c_void) -> Outcome {
-    unsafe { ffi::call(|| Ok(Owned::new((&*pointer.cast::<Snapshot>()).info()?))) }
+pub unsafe extern "C" fn dh_Snapshot_info(
+    pointer: *const c_void,
+    progress: ffi::Progress,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new((&*pointer.cast::<Snapshot>()).info(
+                if progress.context.is_null() {
+                    None
+                } else {
+                    Some(Box::new(progress) as Box<dyn Progress>)
+                },
+            )?))
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -4322,6 +4481,17 @@ pub unsafe extern "C" fn dh_read_Vec_ChunkGroup(pointer: *const c_void) -> Slice
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_Snapshot_chunk_group(pointer: *const c_void, chunk: usize) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(
+                (&*pointer.cast::<Snapshot>()).chunk_group(chunk)?,
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_Snapshot_ownership_name(
     pointer: *const c_void,
     node: usize,
@@ -4397,6 +4567,45 @@ pub unsafe extern "C" fn dh_Snapshot_types(pointer: *const c_void) -> Slice {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_Snapshot_type_stats(pointer: *const c_void) -> Slice {
     unsafe { Slice::new((&*pointer.cast::<Snapshot>()).type_stats()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_Snapshot_type_retained(pointer: *const c_void) -> Outcome {
+    unsafe { ffi::call(|| Ok(Owned::arc((&*pointer.cast::<Snapshot>()).type_retained()?))) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_Snapshot_ownership_instances(
+    pointer: *const c_void,
+    type_id: u32,
+    limit: usize,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(
+                (&*pointer.cast::<Snapshot>()).ownership_instances(type_id, limit)?,
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_Snapshot_ownership_dominator_types(
+    pointer: *const c_void,
+    type_id: u32,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(
+                (&*pointer.cast::<Snapshot>()).ownership_dominator_types(type_id)?,
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Vec_OwnershipTypeGroup(pointer: *const c_void) -> Slice {
+    unsafe { Slice::new(&*pointer.cast::<Vec<OwnershipTypeGroup>>()) }
 }
 
 #[unsafe(no_mangle)]
@@ -4640,16 +4849,62 @@ pub unsafe extern "C" fn dh_NativeGraphView_is_root_chunk(
 pub unsafe extern "C" fn dh_NativeGraphView_largest_chunks(
     pointer: *const c_void,
     chunks: Slice,
+    size: u64,
     limit: usize,
 ) -> Outcome {
     unsafe {
         ffi::call(|| {
             Ok(Owned::new(
-                (&*pointer.cast::<NativeGraphView>())
-                    .largest_chunks(ffi::slice::<i32>(chunks), limit)?,
+                (&*pointer.cast::<NativeGraphView>()).largest_chunks(
+                    ffi::slice::<i32>(chunks),
+                    size,
+                    limit,
+                )?,
             ))
         })
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_NativeGraphView_chunk_sizes(
+    pointer: *const c_void,
+    chunks: Slice,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(
+                (&*pointer.cast::<NativeGraphView>()).chunk_sizes(ffi::slice::<i32>(chunks))?,
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Vec_ChunkSizeGroup(pointer: *const c_void) -> Slice {
+    unsafe { Slice::new(&*pointer.cast::<Vec<ChunkSizeGroup>>()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_NativeGraphView_attribution(
+    pointer: *const c_void,
+    chunk: usize,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(
+                (&*pointer.cast::<NativeGraphView>()).attribution(chunk)?,
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_NativeGraphView_pointer_is_exact(
+    pointer: *const c_void,
+    source: usize,
+    target: usize,
+) -> bool {
+    unsafe { (&*pointer.cast::<NativeGraphView>()).pointer_is_exact(source, target) }
 }
 
 #[unsafe(no_mangle)]
@@ -4701,6 +4956,24 @@ pub unsafe extern "C" fn dh_NativeGraphView_owner_field(
             ))
         })
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipView_roots(pointer: *const c_void) -> Outcome {
+    unsafe { ffi::call(|| Ok(Owned::new((&*pointer.cast::<OwnershipView>()).roots()))) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Vec_OwnershipRoot(pointer: *const c_void) -> Slice {
+    unsafe { Slice::new(&*pointer.cast::<Vec<OwnershipRoot>>()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnershipView_root_references(
+    pointer: *const c_void,
+    node: usize,
+) -> Slice {
+    unsafe { Slice::new((&*pointer.cast::<OwnershipView>()).root_references(node)) }
 }
 
 #[unsafe(no_mangle)]
@@ -4992,6 +5265,45 @@ pub unsafe extern "C" fn dh_processes() -> Outcome {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_read_Vec_Process(pointer: *const c_void) -> Slice {
     unsafe { Slice::new(&*pointer.cast::<Vec<Process>>()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_dump_needs_conversion(path: Slice) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(crate::system::dump_needs_conversion(
+                ffi::string(path),
+            )?))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_convert_dump(
+    source: Slice,
+    target: ffi::OptionalString,
+    progress: ffi::Progress,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(crate::system::convert_dump(
+                ffi::string(source),
+                target.present.then(|| ffi::string(target.value).to_owned()),
+                Box::new(progress),
+            )?))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_smaps_next_to_dump(path: Slice) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(crate::system::smaps_next_to_dump(ffi::string(
+                path,
+            ))))
+        })
+    }
 }
 
 #[unsafe(no_mangle)]

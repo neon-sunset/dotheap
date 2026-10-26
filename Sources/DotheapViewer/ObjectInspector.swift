@@ -6,16 +6,20 @@ struct ObjectInspector: View {
     let snapshot: HeapSnapshot
 
     var body: some View {
-        if let i = session.selectedObject {
-            ObjectDetail(snapshot: snapshot, object: i).id(i)
-        } else {
-            Placeholder("Select an object.")
+        switch session.inspectedObject {
+        case let .object(i): ObjectDetail(snapshot: snapshot, object: i).id(i)
+        case let .chunk(i):
+            Computed(snapshot, key: "native graph inspector", label: "Reading native memory", compute: { try $0.nativeGraph }) { graph in
+                ChunkDetail(snapshot: snapshot, graph: graph, chunk: i)
+            }
+        case nil: Placeholder("Select a managed object or native allocation.")
         }
     }
 }
 
 /// Everything the inspector shows for one object, gathered once in the background.
 struct ObjectModel: Sendable {
+    let ownership: OwnershipInspection?
     let typeName: String
     let methodTable: UInt64
     let address: UInt64
@@ -72,6 +76,10 @@ struct ObjectModel: Sendable {
         words = detail.words
         native = detail.native
         dead = detail.dead
+        if info.live {
+            let graph = try s.ownership
+            ownership = try OwnershipInspection(s, graph: graph, node: graph.objectNode(i))
+        } else { ownership = nil }
     }
 
 }
@@ -99,7 +107,7 @@ struct ObjectDetail: View {
     private func content(_ m: ObjectModel) -> some View {
         let region = snapshot.heap.regions[m.regionIndex]
         return ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            LazyVStack(alignment: .leading, spacing: 12) {
                 Text(m.typeName).font(.headline).textSelection(.enabled)
                 Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
                     row("Address", Format.hex(m.address))
@@ -111,14 +119,20 @@ struct ObjectDetail: View {
                     case .pendingFinalization: row("State", "pending finalization")
                     case .dead: row("State", "dead (unreachable, not swept)")
                     }
-                    row("Retained", Format.bytes(m.retained))
+                    row("Retained managed", Format.bytes(m.ownership?.managed ?? m.retained))
+                    if let ownership = m.ownership { row("Retained native", Format.bytes(ownership.native)) }
                     GridRow {
                         Text("Region").foregroundStyle(.secondary)
                         Button("\(Format.hex(region.start)) \(region.generationName), \(Glossary.queue(region.queue).name)") {
                             session.show(region: m.regionIndex)
                         }.buttonStyle(.link).help(Glossary.queue(region.queue).help)
                     }
-                    if let d = m.dominator {
+                    if let dominator = m.ownership?.dominator {
+                        GridRow {
+                            Text("Dominator").foregroundStyle(.secondary)
+                            OwnershipLink(snapshot: snapshot, reference: dominator)
+                        }
+                    } else if let d = m.dominator {
                         GridRow {
                             Text("Dominator").foregroundStyle(.secondary)
                             if d < snapshot.heap.count { ObjectLink(snapshot: snapshot, object: d) } else { Text(snapshot.nodeName(d)).lineLimit(2) }
@@ -134,10 +148,9 @@ struct ObjectDetail: View {
                 if let native = m.native {
                     group("Native memory (\(native.chunks.count) malloc chunks, keeps \(Format.bytes(native.kept)) alone)") {
                         ForEach(native.chunks, id: \.id) { c in
-                            HStack(spacing: 6) {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 if let f = c.field { Text("." + PathList.propertyName(f)).font(.caption.monospaced()).foregroundStyle(.secondary) }
-                                Text(c.label).font(.caption).lineLimit(1).truncationMode(.middle)
-                                Text(Format.bytes(c.size)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                NativeLink(snapshot: snapshot, chunk: Int(c.id), name: c.label)
                             }
                         }
                     }
@@ -174,7 +187,7 @@ struct ObjectDetail: View {
                 } else if let elements = m.referenceElements {
                     group("Elements (\(m.length ?? 0))") {
                         ForEach(elements, id: \.index) { e in
-                            HStack(spacing: 8) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Text("[\(e.index)]").font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 50, alignment: .trailing)
                                 if let t = e.target { ObjectLink(snapshot: snapshot, object: t) } else { Text(e.value == 0 ? "null" : Format.hex(e.value)).font(.caption.monospaced()).foregroundStyle(.secondary) }
                             }
@@ -198,15 +211,19 @@ struct ObjectDetail: View {
                     }
                 }
 
-                if m.live {
+                if let ownership = m.ownership {
                     group("Path to root (shortest)") {
-                        if let source = m.pathSource {
-                            Label(snapshot.describe(source: source), systemImage: "arrow.up.to.line").font(.caption).lineLimit(2)
-                            if let slot = m.rootSlot {
-                                Text(slot).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(3).padding(.leading, 20).textSelection(.enabled)
+                        if ownership.path.contains(where: { if case .chunk = $0.node { true } else { false } }) {
+                            ForEach(ownership.path) { reference in OwnershipLink(snapshot: snapshot, reference: reference) }
+                        } else {
+                            if let source = m.pathSource {
+                                Label(snapshot.describe(source: source), systemImage: "arrow.up.to.line").font(.caption).lineLimit(2)
+                                if let slot = m.rootSlot {
+                                    Text(slot).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(3).padding(.leading, 20).textSelection(.enabled)
+                                }
                             }
+                            PathList(snapshot: snapshot, path: m.path, names: m.pathNames)
                         }
-                        PathList(snapshot: snapshot, path: m.path, names: m.pathNames)
                     }
                 }
 
@@ -215,7 +232,7 @@ struct ObjectDetail: View {
                         Label(snapshot.describe(source: s), systemImage: "arrow.up.to.line").font(.caption).lineLimit(2)
                     }
                     ForEach(Array(m.referrers.enumerated()), id: \.offset) { k, r in
-                        HStack(spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
                             ObjectLink(snapshot: snapshot, object: r)
                             if let name = m.referrerNames[k] { Text(PathList.propertyName(name)).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1) }
                         }
@@ -232,7 +249,7 @@ struct ObjectDetail: View {
                     Text("Memory: \(m.words.count) words of the object as they are in the dump").font(.subheadline.weight(.semibold))
                 } content: {
                     ForEach(m.words) { w in
-                        HStack(spacing: 8) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text("+\(String(w.offset, radix: 16))").foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
                             Text(String(format: "%016llx", w.value))
                             if w.offset == 0 { Text("method table").foregroundStyle(.secondary) }
@@ -242,7 +259,7 @@ struct ObjectDetail: View {
                     }
                 }
             }
-            .padding(12)
+            .padding(PageInsets.detail)
         }
     }
 
@@ -254,7 +271,7 @@ struct ObjectDetail: View {
     }
 
     private func group(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        LazyVStack(alignment: .leading, spacing: 4) {
             Text(title).font(.subheadline.weight(.semibold))
             content()
         }
@@ -267,7 +284,7 @@ struct FieldTree: View {
     let values: RustArray<HeapSnapshot.FieldValue>
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        LazyVStack(alignment: .leading, spacing: 2) {
             ForEach(values) { f in
                 if f.children.isEmpty {
                     row(f).padding(.leading, 16)
@@ -299,7 +316,7 @@ struct PathList: View {
 
     var body: some View {
         ForEach(Array(path.enumerated()), id: \.offset) { k, o in
-            HStack(spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Image(systemName: "arrow.turn.down.right").font(.caption2).foregroundStyle(.secondary)
                 if let name = names[k] { Text(Self.propertyName(name)).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(Self.propertyName(name)) }
                 ObjectLink(snapshot: snapshot, object: o)

@@ -3,6 +3,7 @@ use crate::{
     bytes::align_up,
     column::{Column, ColumnStore},
     core_dump::{CoreDump, Cursor},
+    progress::Progress,
     runtime::RuntimeInfo,
 };
 use rayon::prelude::*;
@@ -237,6 +238,16 @@ impl ManagedHeap {
         runtime: Option<&RuntimeInfo>,
         store: ColumnStore,
     ) -> Result<Self> {
+        Self::new_with_progress(dump, runtime, store, Progress::none())
+    }
+
+    pub(crate) fn new_with_progress(
+        dump: Arc<CoreDump>,
+        runtime: Option<&RuntimeInfo>,
+        store: ColumnStore,
+        progress: Progress<'_>,
+    ) -> Result<Self> {
+        progress.report(0.0);
         let found = if let Some(found) = crate::satori_heap::find(&dump, runtime)? {
             found
         } else if let Some(found) =
@@ -319,12 +330,23 @@ impl ManagedHeap {
             store,
             saved,
         };
-        heap.walk(&merged)?;
+        progress.report(0.05);
+        heap.walk(&merged, progress.portion(0.05, 1.0))?;
         heap.dump.check()?;
         Ok(heap)
     }
 
     pub fn from_saved(dump: Arc<CoreDump>, store: ColumnStore, saved: HeapSaved) -> Result<Self> {
+        Self::from_saved_with_progress(dump, store, saved, Progress::none())
+    }
+
+    pub(crate) fn from_saved_with_progress(
+        dump: Arc<CoreDump>,
+        store: ColumnStore,
+        saved: HeapSaved,
+        progress: Progress<'_>,
+    ) -> Result<Self> {
+        progress.report(0.0);
         let heap = Self {
             addresses: store.open("addresses")?,
             type_ids: store.open("typeIds")?,
@@ -361,6 +383,7 @@ impl ManagedHeap {
         }
         let mut next_object = 0;
         let mut previous_end = 0;
+        let objects = progress.portion(0.1, 0.95);
         for (index, region) in heap.regions.iter().enumerate() {
             if region.index != index
                 || region.start < previous_end
@@ -377,6 +400,9 @@ impl ManagedHeap {
                 return Err(Error::cache("invalid heap region"));
             }
             for object in region.first_object..region.end_object {
+                if object % 4096 == 0 {
+                    objects.items(object, n);
+                }
                 let size = if heap.sizes32[object] == u32::MAX {
                     heap.large_sizes.get(&object).copied()
                 } else {
@@ -406,6 +432,7 @@ impl ManagedHeap {
                 return Err(Error::cache("invalid heap address index"));
             }
         }
+        progress.report(1.0);
         Ok(heap)
     }
 
@@ -481,11 +508,30 @@ impl ManagedHeap {
         i < self.regions.len() && self.regions[i].start < end
     }
 
-    fn walk(&mut self, gaps: &[(u64, u64)]) -> Result<()> {
+    fn walk(&mut self, gaps: &[(u64, u64)], progress: Progress<'_>) -> Result<()> {
+        let bytes: u64 = self
+            .regions
+            .iter()
+            .map(|r| r.used.min(r.end).saturating_sub(r.object_start))
+            .sum();
+        let counted = progress.portion(0.0, 0.4).counter(bytes);
         let results: Vec<_> = self
             .regions
             .par_iter()
-            .map(|r| walk_region(&self.dump, self.kind.gc, gaps, r, |_, _, _, _| {}))
+            .map(|r| {
+                let mut at = r.object_start;
+                let mut objects = 0;
+                let result =
+                    walk_region(&self.dump, self.kind.gc, gaps, r, |address, _, size, _| {
+                        objects += 1;
+                        if objects % 4096 == 0 {
+                            counted(address + size - at);
+                            at = address + size;
+                        }
+                    });
+                counted(r.used.min(r.end).saturating_sub(at));
+                result
+            })
             .collect();
         self.dump.check()?;
         let mut total = 0usize;
@@ -529,6 +575,7 @@ impl ManagedHeap {
         }
         let dump = &self.dump;
         let gc = self.saved.kind.gc;
+        let copied = progress.portion(0.4, 0.8).counter(total as u64);
         let valid = parts.into_par_iter().all(|(r, a, t, s, l)| {
             let mut i = 0;
             let result = walk_region(dump, gc, gaps, r, |address, mt, size, length| {
@@ -539,7 +586,11 @@ impl ManagedHeap {
                     l[i] = length;
                 }
                 i += 1;
+                if i % 4096 == 0 {
+                    copied(4096);
+                }
             });
+            copied((i % 4096) as u64);
             result.objects == a.len()
         });
         self.dump.check()?;
@@ -550,7 +601,11 @@ impl ManagedHeap {
         }
         let mut type_index = HashMap::new();
         self.type_ids = self.store.make(total, Some("typeIds"))?;
+        let types = progress.portion(0.8, 0.95);
         for (i, &mt) in tables.iter().enumerate() {
+            if i % 4096 == 0 {
+                types.items(i, total);
+            }
             let id = *type_index.entry(mt).or_insert_with(|| {
                 let id = self.saved.types.len() as u32;
                 self.saved.types.push(MethodTableInfo {
@@ -599,6 +654,7 @@ impl ManagedHeap {
         } else {
             self.granule_first = self.store.make(0, Some("granuleFirst"))?;
         }
+        progress.report(1.0);
         Ok(())
     }
 }

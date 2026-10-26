@@ -7,6 +7,7 @@ use crate::{
     graph::{AnalysisOptions, GraphSaved, HeapGraph},
     heap::{GRANULE, Gc, HeapSaved, ManagedHeap, Region},
     native_memory::{NativeMemory, non_zero_bytes},
+    progress::Progress,
     runtime::RuntimeInfo,
     smaps::{self, Residency, SmapsMapping},
     type_names::TypeNames,
@@ -21,6 +22,116 @@ use std::{
 };
 
 const CACHE_FORMAT: &str = "rust-7";
+
+pub fn convert_dump(
+    source: &Path,
+    target: Option<&Path>,
+    progress: impl FnMut(f64) -> bool,
+) -> Result<Vec<String>> {
+    let before = identity(source)?;
+    let old_caches = [false, true].map(|native_memory_roots| {
+        let options = AnalysisOptions {
+            native_memory_roots,
+        };
+        (options, CacheChoice::Automatic.directory(source, options))
+    });
+    let companion = target
+        .and_then(|target| {
+            smaps::next_to_dump(source).map(|source| {
+                let mut target = smaps::path_for_dump(target);
+                if source.extension().is_some_and(|e| e == "gz") {
+                    target.set_extension("gz");
+                } else if source.extension().is_some_and(|e| e == "smaps") {
+                    target.set_extension("");
+                }
+                (source, target)
+            })
+        })
+        .filter(|(source, target)| source != target);
+    let companion = if let Some((source, target)) = companion {
+        if target.exists() {
+            return Err(crate::Error::open(
+                target.display(),
+                "a memory map already exists at this path",
+            ));
+        }
+        let mut output = tempfile::NamedTempFile::new_in(target.parent().unwrap())?;
+        std::io::copy(&mut fs::File::open(source)?, &mut output)?;
+        output.as_file().sync_all()?;
+        Some((output, target))
+    } else {
+        None
+    };
+    crate::compressed::convert(source, target, progress)?;
+    if let Some((output, target)) = companion {
+        output
+            .persist_noclobber(&target)
+            .map_err(|e| crate::Error::open(target.display(), e.error))?;
+    }
+    let mut warnings = Vec::new();
+    let destination = target.unwrap_or(source);
+    for (options, from) in old_caches {
+        if let Ok(Some(from)) = from
+            && from.is_dir()
+            && let Ok(Some(to)) = CacheChoice::Automatic.directory(destination, options)
+            && let Err(error) =
+                finish_converted_cache(&before, destination, &from, &to, target.is_none())
+            && target.is_none()
+        {
+            warnings.push(format!(
+                "The dump was converted, but its old compressed cache could not be removed: {error}"
+            ));
+        }
+    }
+    Ok(warnings)
+}
+
+fn finish_converted_cache(
+    before: &str,
+    target: &Path,
+    from: &Path,
+    to: &Path,
+    replaced: bool,
+) -> Result<()> {
+    let Some(_source_guard) = CacheGuard::try_lock(from)? else {
+        return Err(crate::Error::cache(format!("{} is in use", from.display())));
+    };
+    let _ = reuse_converted_cache(before, target, from, to);
+    if replaced && fs::read_to_string(from.join("core.dump")).is_ok_and(|value| value == before) {
+        for name in [
+            "core.dump",
+            "core.blocks",
+            "core.index.col",
+            "core.starts.col",
+        ] {
+            if let Err(error) = fs::remove_file(from.join(name))
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(crate::Error::open(from.join(name).display(), error));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reuse_converted_cache(before: &str, target: &Path, from: &Path, to: &Path) -> Result<()> {
+    let mut manifest: Manifest = serde_json::from_slice(&fs::read(from.join("manifest.json"))?)?;
+    if manifest.format != CACHE_FORMAT || manifest.dump_identity != before {
+        return Ok(());
+    }
+    let _target_guard = CacheGuard::lock(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry.path().extension().is_some_and(|e| e == "col")
+            && !entry.file_name().to_string_lossy().starts_with("core.")
+        {
+            fs::hard_link(entry.path(), to.join(entry.file_name()))?;
+        }
+    }
+    manifest.dump_identity = identity(target)?;
+    atomic_write(&to.join("manifest.json"), &serde_json::to_vec(&manifest)?)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -164,8 +275,22 @@ impl HeapSnapshot {
         smaps_path: Option<PathBuf>,
         options: AnalysisOptions,
         cache: CacheChoice,
-        progress: impl Fn(&str, f64),
+        progress: impl Fn(&str, f64) + Sync,
     ) -> Result<Self> {
+        let reported = Mutex::new((String::new(), 0.0, std::time::Instant::now()));
+        let update = |name: &str, fraction: f64| {
+            let mut last = reported.lock().unwrap();
+            let fraction = fraction.clamp(last.1, 1.0);
+            if name != last.0
+                || fraction == 1.0
+                || fraction >= last.1 + 0.002 && last.2.elapsed().as_millis() >= 33
+            {
+                progress(name, fraction);
+                *last = (name.into(), fraction, std::time::Instant::now());
+            }
+        };
+        let progress = Progress::new(&update);
+        progress.named("Opening the dump").report(0.0);
         let directory = cache.directory(path, options)?;
         let _guard = directory
             .as_ref()
@@ -185,7 +310,7 @@ impl HeapSnapshot {
         {
             let _ = fs::remove_file(dir.join("manifest.json"));
         }
-        progress("Reading the dump", 0.0);
+        let reading = progress.portion(0.0, 0.5).named("Opening the dump");
         let discard_failed_cache = |error| {
             if let Some(directory) = &directory {
                 for name in ["manifest.json", "core.dump"] {
@@ -194,25 +319,31 @@ impl HeapSnapshot {
             }
             error
         };
-        let opened = CoreDump::open(
+        let opened = CoreDump::open_with_progress(
             path,
             directory.as_deref(),
             saved.as_ref().map(|m| m.core.clone()),
+            reading,
         );
         let dump = match opened {
             Ok(dump) => dump,
             Err(_) if saved.is_some() => {
                 saved = None;
-                CoreDump::open(path, directory.as_deref(), None).map_err(&discard_failed_cache)?
+                CoreDump::open_with_progress(path, directory.as_deref(), None, reading)
+                    .map_err(discard_failed_cache)?
             }
             Err(error) => return Err(discard_failed_cache(error)),
         };
         let mut dump = Arc::new(dump);
         let had_saved = saved.is_some();
         let cached = saved.and_then(|m| {
-            progress("Opening the cache", 0.0);
+            let [objects, references] = progress.portion(0.5, 0.7).phases([
+                ("Opening cached objects", 1.0),
+                ("Opening cached references", 2.0),
+            ]);
             let store = ColumnStore::new(directory.clone()).ok()?;
-            let mut heap = ManagedHeap::from_saved(dump.clone(), store, m.heap).ok()?;
+            let mut heap =
+                ManagedHeap::from_saved_with_progress(dump.clone(), store, m.heap, objects).ok()?;
             if heap.kind.gc == Gc::Satori {
                 crate::satori_heap::assign_allocating_threads(
                     &dump,
@@ -220,7 +351,7 @@ impl HeapSnapshot {
                     &mut heap.saved.regions,
                 );
             }
-            let graph = HeapGraph::from_saved(&heap, m.graph).ok()?;
+            let graph = HeapGraph::from_saved_with_progress(&heap, m.graph, references).ok()?;
             if m.type_stats.len() != heap.types.len()
                 || m.type_stats.iter().enumerate().any(|(i, t)| {
                     t.type_id as usize != i
@@ -239,6 +370,24 @@ impl HeapSnapshot {
             Some((m.runtime, heap, graph, m.native, m.type_stats))
         });
         let from_cache = cached.is_some();
+        let remaining = progress.portion(reported.lock().unwrap().1.max(0.5), 1.0);
+        let [walking, references, native_progress, types, saving] = if from_cache {
+            progress.portion(0.7, 1.0).phases([
+                ("Walking the heap", 0.0),
+                ("References and roots", 0.0),
+                ("Native memory", 0.0),
+                ("Resolving type names", 19.0),
+                ("Checking the dump", 1.0),
+            ])
+        } else {
+            remaining.phases([
+                ("Walking the heap", 20.0),
+                ("References and roots", 30.0),
+                ("Native memory", 30.0),
+                ("Types", 15.0),
+                ("Saving the analysis", 5.0),
+            ])
+        };
         let (runtime, heap, graph, native, type_stats) = if let Some(cached) = cached {
             cached
         } else {
@@ -248,28 +397,38 @@ impl HeapSnapshot {
             if had_saved {
                 dump = Arc::new(
                     CoreDump::open(path, directory.as_deref(), None)
-                        .map_err(&discard_failed_cache)?,
+                        .map_err(discard_failed_cache)?,
                 );
             }
             let store = ColumnStore::new(directory.clone())?;
-            progress("Walking the heap", 0.0);
+            walking.report(0.0);
             let runtime = RuntimeInfo::find(&dump);
-            let mut heap = ManagedHeap::new(dump.clone(), runtime.as_ref(), store)?;
-            progress("References and roots", 0.3);
-            let graph = HeapGraph::new(&mut heap, runtime.as_ref(), options)?;
-            progress("Native memory", 0.7);
-            let native = NativeMemory::new(&dump, &heap, &graph.handle_segment_addresses);
+            let mut heap =
+                ManagedHeap::new_with_progress(dump.clone(), runtime.as_ref(), store, walking)?;
+            let graph =
+                HeapGraph::new_with_progress(&mut heap, runtime.as_ref(), options, references)?;
+            let native = NativeMemory::new_with_progress(
+                &dump,
+                &heap,
+                &graph.handle_segment_addresses,
+                native_progress,
+            );
             (runtime, heap, graph, native, Vec::new())
         };
-        let names = Arc::new(TypeNames::new(
+        types.report(0.0);
+        let names = Arc::new(TypeNames::new_with_progress(
             dump.clone(),
             heap.free_method_table,
             &dll_folders,
             heap.types.iter().map(|t| t.address),
+            types.portion(0.0, 0.1),
         ));
         let smaps_path = smaps_path.or_else(|| smaps::next_to_dump(path));
         let smaps = smaps_path.as_ref().map(|p| smaps::read(p)).transpose()?;
-        let symbol_identity = crate::symbols::cache_identity(&dump);
+        let symbol_identity = crate::symbols::cache_identity_with_progress(
+            &dump,
+            types.portion(0.1, 0.6).named("Checking cached symbols"),
+        );
         let smaps_identity = smaps_path
             .as_ref()
             .and_then(|p| crate::compressed::identity(p).ok())
@@ -303,15 +462,18 @@ impl HeapSnapshot {
             results_directory,
         };
         if !from_cache {
-            progress("Types", 0.9);
-            snapshot.build_type_stats();
+            snapshot.build_type_stats(types.portion(0.6, 1.0));
         } else {
-            for t in &mut snapshot.type_stats {
+            let count = snapshot.type_stats.len();
+            for (i, t) in snapshot.type_stats.iter_mut().enumerate() {
+                types.portion(0.6, 1.0).items(i, count);
                 t.name = snapshot
                     .names
                     .name(snapshot.heap.types[t.type_id as usize].address);
             }
         }
+        types.report(1.0);
+        saving.report(0.0);
         snapshot.dump.check().map_err(discard_failed_cache)?;
         if identity(path)? != before {
             return Err(crate::Error::open(
@@ -339,7 +501,8 @@ impl HeapSnapshot {
                 path.canonicalize()?.to_string_lossy().as_bytes(),
             )?;
         }
-        progress("Done", 1.0);
+        saving.report(1.0);
+        progress.named("Done").report(1.0);
         Ok(snapshot)
     }
     pub fn memo<T: Send + Sync + 'static>(
@@ -389,19 +552,25 @@ impl HeapSnapshot {
             Ok(value)
         })
     }
-    fn build_type_stats(&mut self) {
+    fn build_type_stats(&mut self, progress: Progress<'_>) {
         let mut stats: Vec<_> = self
             .heap
             .types
             .iter()
             .enumerate()
-            .map(|(i, t)| TypeStats {
-                type_id: i as u32,
-                name: self.names.name(t.address),
-                ..TypeStats::default()
+            .map(|(i, t)| {
+                progress.portion(0.0, 0.6).items(i, self.heap.types.len());
+                TypeStats {
+                    type_id: i as u32,
+                    name: self.names.name(t.address),
+                    ..TypeStats::default()
+                }
             })
             .collect();
         for i in 0..self.heap.count() {
+            if i % 4096 == 0 {
+                progress.portion(0.6, 0.8).items(i, self.heap.count());
+            }
             let t = &mut stats[self.heap.type_ids[i] as usize];
             let size = self.heap.size(i);
             t.count += 1;
@@ -421,6 +590,7 @@ impl HeapSnapshot {
         }
         let mut on_path = vec![0usize; stats.len()];
         let mut stack = vec![(self.graph.root_node(), 0usize)];
+        let mut visited = 0;
         while let Some((node, child)) = stack.last_mut() {
             if let Some(&w) = self.graph.dominator_rows.row(*node).get(*child) {
                 *child += 1;
@@ -435,12 +605,19 @@ impl HeapSnapshot {
                 stack.push((w, 0));
             } else {
                 let (v, _) = stack.pop().unwrap();
+                visited += 1;
+                if visited % 4096 == 0 {
+                    progress
+                        .portion(0.9, 1.0)
+                        .items(visited, self.graph.idom.len());
+                }
                 if v < self.heap.count() {
                     on_path[self.heap.type_ids[v] as usize] -= 1;
                 }
             }
         }
         self.type_stats = stats;
+        progress.report(1.0);
     }
     pub fn totals(&self) -> RegionStats {
         RegionStats::new("all", &self.heap.regions)
@@ -612,5 +789,130 @@ impl HeapSnapshot {
         );
         parts.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.name.cmp(&b.name)));
         Ok(parts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn converted_dumps_reuse_object_and_reference_columns() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/generate-compatibility-fixtures.py");
+        assert!(
+            Command::new(if cfg!(windows) { "python" } else { "python3" })
+                .arg(script)
+                .arg(directory.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let source = directory.path().join("original.zst");
+        let target = directory.path().join("converted.zst");
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        std::io::copy(
+            &mut fs::File::open(directory.path().join("reference-rooted.dmp")).unwrap(),
+            &mut encoder,
+        )
+        .unwrap();
+        fs::write(&source, encoder.finish().unwrap()).unwrap();
+        let from = directory.path().join("old-cache");
+        let to = directory.path().join("new-cache");
+        let open = |path: &Path, cache: &Path| {
+            HeapSnapshot::open(
+                path,
+                Vec::new(),
+                None,
+                AnalysisOptions::default(),
+                CacheChoice::Folder(cache.into()),
+                |_, _| {},
+            )
+            .unwrap()
+        };
+        {
+            let original = open(&source, &from);
+            assert!(!original.from_cache);
+        }
+        crate::compressed::convert(&source, Some(&target), |_| true).unwrap();
+        reuse_converted_cache(&identity(&source).unwrap(), &target, &from, &to).unwrap();
+        assert!(!to.join("core.index.col").exists());
+        let converted = open(&target, &to);
+        let original = open(&source, &from);
+        assert!(converted.from_cache);
+        assert_eq!(&converted.heap.addresses[..], &original.heap.addresses[..]);
+        assert_eq!(&converted.graph.idom[..], &original.graph.idom[..]);
+        assert_eq!(converted.graph.references(0), original.graph.references(0));
+        assert!(!to.join("core.blocks").exists());
+    }
+
+    #[test]
+    fn replacement_reuses_analysis_and_removes_only_the_obsolete_compressed_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/generate-compatibility-fixtures.py");
+        assert!(
+            Command::new(if cfg!(windows) { "python" } else { "python3" })
+                .arg(script)
+                .arg(directory.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let source = directory.path().join("original.zst");
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        std::io::copy(
+            &mut fs::File::open(directory.path().join("reference-rooted.dmp")).unwrap(),
+            &mut encoder,
+        )
+        .unwrap();
+        fs::write(&source, encoder.finish().unwrap()).unwrap();
+        let before = identity(&source).unwrap();
+        let from = directory.path().join("old-cache");
+        let to = directory.path().join("new-cache");
+        let open = |cache: &Path| {
+            HeapSnapshot::open(
+                &source,
+                Vec::new(),
+                None,
+                AnalysisOptions::default(),
+                CacheChoice::Folder(cache.into()),
+                |_, _| {},
+            )
+            .unwrap()
+        };
+        let original = open(&from);
+        assert!(from.join("core.blocks").is_file());
+        assert!(crate::compressed::convert(&source, None, |_| false).is_err());
+        assert!(from.join("core.blocks").is_file());
+        crate::compressed::convert(&source, None, |_| true).unwrap();
+        finish_converted_cache(&before, &source, &from, &to, true).unwrap();
+        for name in [
+            "core.blocks",
+            "core.dump",
+            "core.index.col",
+            "core.starts.col",
+        ] {
+            assert!(!from.join(name).exists(), "{name}");
+        }
+        assert!(from.join("addresses.col").is_file());
+        let converted = open(&to);
+        assert!(converted.from_cache);
+        assert_eq!(&converted.heap.addresses[..], &original.heap.addresses[..]);
+        assert_eq!(
+            converted.dump.u64(converted.heap.addresses[0]),
+            original.dump.u64(original.heap.addresses[0])
+        );
+        assert!(!to.join("core.blocks").exists());
+
+        fs::write(from.join("core.dump"), "a different dump identity").unwrap();
+        fs::write(from.join("core.blocks"), b"a different cache").unwrap();
+        finish_converted_cache(&before, &source, &from, &to, true).unwrap();
+        assert_eq!(
+            fs::read(from.join("core.blocks")).unwrap(),
+            b"a different cache"
+        );
     }
 }

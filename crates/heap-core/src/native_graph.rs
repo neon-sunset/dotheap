@@ -112,8 +112,7 @@ pub struct NativeGraphData {
     pub owned_chunks: BTreeMap<usize, Vec<i32>>,
     pub chunk_owners: BTreeMap<i32, Vec<usize>>,
     pub root_chunks: BTreeSet<i32>,
-    pub root_source: BTreeMap<i32, String>,
-    pub root_stack_slot: BTreeMap<i32, (u64, i32)>,
+    pub root_sources: BTreeMap<i32, Vec<String>>,
     pub managed_references: BTreeMap<i32, Vec<usize>>,
     pub handle_references: BTreeMap<i32, Vec<u64>>,
     pub native_retained: BTreeMap<usize, u64>,
@@ -136,10 +135,69 @@ impl std::ops::Deref for NativeGraph {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChunkGroup {
+    pub id: String,
     pub label: String,
+    pub kind: ChunkAttributionKind,
     pub reach: Reach,
     pub library: Option<String>,
     pub chunks: Vec<i32>,
+    pub bytes: u64,
+    pub min_size: u64,
+    pub max_size: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChunkAttributionKind {
+    CppType,
+    CppDominator,
+    CppReferrer,
+    CppInteriorReferrer,
+    ManagedDominator,
+    ManagedReferrer,
+    NativeRoot,
+    Symbol,
+    Library,
+    Text,
+    Unknown,
+}
+impl ChunkAttributionKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::CppType => "C++ type",
+            Self::CppDominator => "C++ dominator",
+            Self::CppReferrer => "C++ referrer",
+            Self::CppInteriorReferrer => "C++ referrer (interior pointers)",
+            Self::ManagedDominator => "Managed dominator",
+            Self::ManagedReferrer => "Managed referrer",
+            Self::NativeRoot => "Native root",
+            Self::Symbol => "Symbol pointer",
+            Self::Library => "Library pointer",
+            Self::Text => "Text",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    pub(crate) fn group_kind(self) -> Self {
+        match self {
+            Self::CppDominator | Self::CppInteriorReferrer => Self::CppReferrer,
+            Self::ManagedDominator => Self::ManagedReferrer,
+            other => other,
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChunkAttribution {
+    pub kind: ChunkAttributionKind,
+    pub label: String,
+    pub library: Option<String>,
+    pub source_chunk: Option<usize>,
+    pub source_object: Option<usize>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[repr(C)]
+pub struct ChunkSizeGroup {
+    pub size: u64,
+    pub count: usize,
     pub bytes: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,7 +264,33 @@ impl HeapSnapshot {
     }
 }
 impl NativeGraphData {
-    pub fn largest_chunks(&self, chunks: &[i32], limit: usize) -> Result<Vec<i32>> {
+    pub fn chunk_sizes(&self, chunks: &[i32]) -> Result<Vec<ChunkSizeGroup>> {
+        let mut sizes = BTreeMap::<u64, usize>::new();
+        for &index in chunks {
+            let chunk = self
+                .chunks
+                .get(index as usize)
+                .ok_or_else(|| crate::Error("Chunk index is out of range".into()))?;
+            *sizes.entry(chunk.size).or_default() += 1;
+        }
+        let mut sizes: Vec<_> = sizes
+            .into_iter()
+            .map(|(size, count)| ChunkSizeGroup {
+                size,
+                count,
+                bytes: size * count as u64,
+            })
+            .collect();
+        sizes.sort_by_key(|group| (Reverse(group.bytes), Reverse(group.size)));
+        Ok(sizes)
+    }
+
+    pub fn largest_chunks(
+        &self,
+        chunks: &[i32],
+        size: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<i32>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -216,6 +300,9 @@ impl NativeGraphData {
                 .chunks
                 .get(index as usize)
                 .ok_or_else(|| crate::Error("Chunk index is out of range".into()))?;
+            if size.is_some_and(|size| chunk.size != size) {
+                continue;
+            }
             let key = (chunk.size, Reverse(position), index);
             if largest.len() < limit {
                 largest.push(Reverse(key));
@@ -230,6 +317,11 @@ impl NativeGraphData {
             .into_iter()
             .map(|Reverse((_, _, index))| index)
             .collect())
+    }
+
+    pub fn pointer_is_exact(&self, source: usize, target: usize) -> bool {
+        (self.edge_start[source] as usize..self.edge_start[source + 1] as usize)
+            .any(|edge| self.edge_targets[edge] as usize == target && self.edge_exact[edge])
     }
 
     fn validate(&self, managed_count: usize) -> Result<()> {
@@ -277,12 +369,16 @@ impl NativeGraphData {
             || !self
                 .root_chunks
                 .iter()
-                .chain(self.root_source.keys())
-                .chain(self.root_stack_slot.keys())
+                .chain(self.root_sources.keys())
                 .chain(self.handle_references.keys())
                 .chain(self.texts.keys())
                 .all(|&i| chunk(i))
             || !self.native_retained.keys().all(|&i| i < managed_count)
+            || self.root_sources.iter().any(|(chunk, sources)| {
+                !self.root_chunks.contains(chunk)
+                    || sources.is_empty()
+                    || sources.windows(2).any(|w| w[0] >= w[1])
+            })
             || !self.chunk_dominator.iter().all(|&i| {
                 i == -1 || chunk(i) || (i <= -2 && (-i64::from(i) - 2) < managed_count as i64)
             })
@@ -678,8 +774,10 @@ impl NativeGraphData {
         }
     }
     fn add_root(&mut self, c: usize, source: &str) {
-        if self.root_chunks.insert(c as i32) {
-            self.root_source.insert(c as i32, source.into());
+        self.root_chunks.insert(c as i32);
+        let sources = self.root_sources.entry(c as i32).or_default();
+        if let Err(at) = sources.binary_search_by(|value| value.as_str().cmp(source)) {
+            sources.insert(at, source.into());
         }
     }
     fn scan_roots(&mut self, s: &HeapSnapshot) {
@@ -739,11 +837,6 @@ impl NativeGraphData {
                         && let Some(j) = self.chunk(v)
                         && self.chunks[j].live()
                     {
-                        if let Some(&(_, tid)) = stacks.get(&i)
-                            && !self.root_chunks.contains(&(j as i32))
-                        {
-                            self.root_stack_slot.entry(j as i32).or_insert((slot, tid));
-                        }
                         self.add_root(j, &source);
                     }
                 }
@@ -973,7 +1066,10 @@ impl NativeGraph {
                             continue;
                         }
                         let t = self.edge_targets[e] as usize;
-                        if nearest[t] < 0 {
+                        if nearest[t] < 0
+                            && !self.root_chunks.contains(&(t as i32))
+                            && !self.chunk_owners.contains_key(&(t as i32))
+                        {
                             nearest[t] = nearest[c];
                             queue.push(t);
                         }
@@ -1089,11 +1185,44 @@ impl NativeGraph {
         }
         format!("{}-byte chunk", chunk.size)
     }
-    pub fn group_label(&self, c: usize, s: &HeapSnapshot) -> Result<String> {
+    pub fn attribution(&self, c: usize, s: &HeapSnapshot) -> Result<ChunkAttribution> {
+        use ChunkAttributionKind::*;
+        let cpp = |kind, source, label| ChunkAttribution {
+            kind,
+            label,
+            library: self
+                .symbols
+                .symbol(self.first_words[source])
+                .map(|s| s.library.clone()),
+            source_chunk: Some(source),
+            source_object: None,
+        };
+        let managed = |kind, object, chunk| {
+            let field = (s.heap.method_table(object).component_size() == 0)
+                .then(|| self.owner_field(object, chunk, s))
+                .flatten();
+            ChunkAttribution {
+                kind,
+                label: format!(
+                    "{}{}",
+                    s.type_name(object),
+                    field.map(|f| format!(".{f}")).unwrap_or_default()
+                ),
+                library: None,
+                source_chunk: None,
+                source_object: Some(object),
+            }
+        };
+        let named = |kind, label| ChunkAttribution {
+            kind,
+            label,
+            library: None,
+            source_chunk: None,
+            source_object: None,
+        };
         if let Some(cls) = self.class_name(c) {
-            return Ok(cls);
+            return Ok(cpp(CppType, c, cls));
         }
-        let own = self.label(c, s);
         let mut d = self.chunk_dominator[c];
         let mut top = c;
         for _ in 0..10_000 {
@@ -1101,68 +1230,130 @@ impl NativeGraph {
                 break;
             }
             if let Some(cls) = self.class_name(d as usize) {
-                return Ok(format!("{own} in {cls}"));
+                return Ok(cpp(CppDominator, d as usize, cls));
             }
             top = d as usize;
             d = self.chunk_dominator[top];
         }
         if d <= -2 {
-            return Ok(format!(
-                "{own} under {}",
-                short(&s.type_name((-i64::from(d) - 2) as usize))
-            ));
+            return Ok(managed(ManagedDominator, (-i64::from(d) - 2) as usize, top));
         }
         if self.reach[c] == Reach::DeadManaged
             && let Some(o) = self.nearest_owner(c)
         {
-            return Ok(format!("{own} under dead {}", short(&s.type_name(o))));
+            return Ok(managed(ManagedReferrer, o, c));
         }
-        if let Some((name, by_start)) = self.nearest_class(c) {
-            return Ok(format!(
-                "{own} {} {name}",
-                if by_start { "linked from" } else { "near" }
+        let (nearest, exact) = self.nearest_classes();
+        if nearest[c] >= 0
+            && let Some(name) = self.class_name(nearest[c] as usize)
+        {
+            return Ok(cpp(
+                if exact[c] {
+                    CppReferrer
+                } else {
+                    CppInteriorReferrer
+                },
+                nearest[c] as usize,
+                name,
             ));
+        }
+        if let Some(&o) = self.chunk_owners.get(&(c as i32)).and_then(|v| v.first()) {
+            return Ok(managed(ManagedReferrer, o, c));
         }
         if self.chunks[top].state == ChunkState::Mapping {
-            return Ok(format!(
-                "{own} via anonymous memory at 0x{:x}",
-                self.chunks[top].start
+            let mut source = named(
+                NativeRoot,
+                format!("Anonymous memory at 0x{:x}", self.chunks[top].start),
+            );
+            source.source_chunk = Some(top);
+            return Ok(source);
+        }
+        if let Some(sources) = self.root_sources.get(&(top as i32)) {
+            return Ok(named(
+                NativeRoot,
+                if sources.len() == 1 {
+                    sources[0].clone()
+                } else {
+                    format!("Shared by {} native root sources", sources.len())
+                },
             ));
         }
-        if let Some(source) = self.root_source.get(&(top as i32)) {
-            if let Some(&(slot, tid)) = self.root_stack_slot.get(&(top as i32)) {
-                let stacks = s.thread_stacks()?;
-                if let Some(t) = stacks.thread(tid) {
-                    return Ok(format!(
-                        "{own} from the frame of {} on {}",
-                        stacks.describe(stacks.owner(slot, t)),
-                        stacks.label(tid)
-                    ));
-                }
-            }
-            return Ok(format!("{own} from {source}"));
+        if let Some(symbol) = self.symbols.symbol(self.first_words[c]) {
+            let mut source = named(
+                Symbol,
+                demangle(&symbol.name).unwrap_or_else(|| symbol.name.clone()),
+            );
+            source.library = Some(symbol.library.clone());
+            return Ok(source);
         }
-        Ok(own)
+        if let Some(library) = self.symbols.library(self.first_words[c]) {
+            let mut source = named(Library, library.to_owned());
+            source.library = Some(library.to_owned());
+            return Ok(source);
+        }
+        if self
+            .texts
+            .get(&(c as i32))
+            .is_some_and(|t| t.chars().count() >= 6)
+        {
+            return Ok(named(Text, "Text".into()));
+        }
+        Ok(named(Unknown, "Unidentified chunks".into()))
+    }
+
+    pub fn group_label(&self, c: usize, s: &HeapSnapshot) -> Result<String> {
+        use ChunkAttributionKind::*;
+        let source = self.attribution(c, s)?;
+        let own = if source.kind == ManagedReferrer && self.chunk_owners.contains_key(&(c as i32)) {
+            format!("{}-byte chunk", self.chunks[c].size)
+        } else {
+            self.label(c, s)
+        };
+        Ok(match source.kind {
+            CppType => source.label,
+            CppDominator | ManagedDominator => format!("{own}; dominated by {}", source.label),
+            CppReferrer => format!("{own}; pointers from {}", source.label),
+            CppInteriorReferrer => format!(
+                "{own}; pointers from {} (includes interior pointers)",
+                source.label
+            ),
+            ManagedReferrer => format!("{own}; referenced by {}", source.label),
+            NativeRoot => format!("{own}; reachable from {}", source.label),
+            _ => own,
+        })
     }
     pub fn groups(&self, s: &HeapSnapshot) -> Result<Vec<ChunkGroup>> {
-        let mut groups = BTreeMap::<(Reach, String), ChunkGroup>::new();
+        let mut groups = BTreeMap::new();
         for i in 0..self.chunks.len() {
             if !self.chunks[i].malloc() {
                 continue;
             }
-            let label = self.group_label(i, s)?;
+            let attribution = self.attribution(i, s)?;
+            let kind = attribution.kind.group_kind();
             let reach = self.reach[i];
+            let size = self.chunks[i].size;
             let group = groups
-                .entry((reach, label.clone()))
-                .or_insert_with(|| ChunkGroup {
-                    label,
+                .entry((
                     reach,
-                    library: self.library(i),
+                    kind,
+                    attribution.label.clone(),
+                    attribution.library.clone(),
+                ))
+                .or_insert_with(|| ChunkGroup {
+                    id: i.to_string(),
+                    label: attribution.label,
+                    kind,
+                    reach,
+                    library: attribution.library,
                     chunks: vec![],
                     bytes: 0,
+                    min_size: size,
+                    max_size: size,
                 });
             group.chunks.push(i as i32);
-            group.bytes += self.chunks[i].size;
+            group.bytes += size;
+            group.min_size = group.min_size.min(size);
+            group.max_size = group.max_size.max(size);
         }
         let mut list: Vec<_> = groups.into_values().collect();
         list.sort_by(|a, b| {
@@ -1170,6 +1361,8 @@ impl NativeGraph {
                 .cmp(&a.bytes)
                 .then(a.label.cmp(&b.label))
                 .then(a.reach.cmp(&b.reach))
+                .then(a.kind.cmp(&b.kind))
+                .then(a.library.cmp(&b.library))
         });
         Ok(list)
     }

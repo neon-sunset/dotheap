@@ -78,6 +78,77 @@ fn options_preserve_paths_repeated_folders_and_unlimited_rows() {
 }
 
 #[test]
+fn native_groups_expose_sizes_chunks_and_reference_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/generate-compatibility-fixtures.py");
+    assert!(
+        Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .arg(script)
+            .arg(directory.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let dump = directory.path().join("native-allocations.dmp");
+    let cache = directory.path().join("cache");
+    let query = |command, extra: &[&str]| {
+        let mut args = vec![
+            command,
+            dump.to_str().unwrap(),
+            "--cache",
+            cache.to_str().unwrap(),
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        let output = run(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let native = query("native", &[]);
+    let groups = native["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2);
+    let group = &groups[0];
+    assert_eq!(group["bytes"], 16384);
+    assert_eq!(group["chunks"], 3);
+    assert_eq!(group["minSize"], 4096);
+    assert_eq!(group["maxSize"], 8192);
+    assert_eq!(group["identifiedBy"], "Native root");
+    let id = group["id"].as_str().unwrap();
+    let detail = query("native", &["--group", id, "--limit", "0"]);
+    assert_eq!(
+        detail["sizes"],
+        json!([
+            {"size": 8192, "chunks": 1, "bytes": 8192},
+            {"size": 4096, "chunks": 2, "bytes": 8192}
+        ])
+    );
+    assert_eq!(detail["allocations"].as_array().unwrap().len(), 3);
+    let filtered = query("native", &["--group", id, "--size", "4096", "--limit", "1"]);
+    assert_eq!(filtered["matchingChunks"], 2);
+    assert_eq!(filtered["allocationsOmitted"], 1);
+    assert_eq!(filtered["allocations"][0]["size"], 4096);
+    let address = filtered["allocations"][0]["address"].as_str().unwrap();
+    let chunk = query("chunk", &[address]);
+    assert_eq!(chunk["attribution"]["identifiedBy"], "Native root");
+    assert_eq!(chunk["pointsToChunks"][0]["pointerToStart"], true);
+    assert_eq!(chunk["pointsToChunks"][0]["size"], 8192);
+    for extra in [
+        vec!["--size", "4096"],
+        vec!["--group", id, "--size", "-1"],
+        vec!["--group", id, "--size", "many"],
+    ] {
+        let mut args = vec!["native", "missing.dmp"];
+        args.extend(extra);
+        assert_eq!(run(&args).status.code(), Some(2));
+    }
+}
+
+#[test]
 fn json_keeps_integer_ranges_addresses_and_omitted_counts() {
     let value = output::record([
         ("bytes", output::bytes(u64::MAX)),

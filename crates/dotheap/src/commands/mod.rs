@@ -188,6 +188,10 @@ impl Context<'_> {
             );
         }
         row.add("name", text(&group.name));
+        if let Some(kind) = group.kind {
+            row.add("identifiedBy", text(kind.title()));
+            row.add("library", optional(group.library.as_deref()));
+        }
         Ok(row)
     }
     pub fn ownership_path(&self, path: &[usize]) -> Result<Value> {

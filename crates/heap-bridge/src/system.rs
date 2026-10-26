@@ -8,6 +8,29 @@ pub fn processes() -> Vec<Process> {
     heap_core::live_process::list()
 }
 
+pub fn dump_needs_conversion(path: &str) -> Result<bool> {
+    Ok(heap_core::compressed::needs_conversion(Path::new(path))?)
+}
+
+pub fn convert_dump(
+    source: &str,
+    target: Option<String>,
+    progress: Box<dyn Progress>,
+) -> Result<Vec<String>> {
+    Ok(heap_core::analysis::convert_dump(
+        Path::new(source),
+        target.as_deref().map(Path::new),
+        |fraction| {
+            progress.update("Converting and verifying the dump", fraction);
+            !progress.cancelled()
+        },
+    )?)
+}
+
+pub fn smaps_next_to_dump(path: &str) -> Option<String> {
+    heap_core::smaps::next_to_dump(Path::new(path)).map(|p| p.to_string_lossy().into_owned())
+}
+
 pub fn default_dump_path(process: &Process) -> Result<String> {
     Ok(heap_core::live_process::default_dump_path(process)?
         .to_string_lossy()

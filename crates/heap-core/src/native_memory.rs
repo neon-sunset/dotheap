@@ -2,6 +2,7 @@ use crate::{
     bytes::align_up,
     core_dump::{CoreDump, Cursor, FileMapping, Platform},
     heap::ManagedHeap,
+    progress::Progress,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -76,6 +77,16 @@ pub struct MallocChunk {
 
 impl NativeMemory {
     pub fn new(dump: &CoreDump, heap: &ManagedHeap, handle_segments: &[u64]) -> Self {
+        Self::new_with_progress(dump, heap, handle_segments, Progress::none())
+    }
+
+    pub(crate) fn new_with_progress(
+        dump: &CoreDump,
+        heap: &ManagedHeap,
+        handle_segments: &[u64],
+        progress: Progress<'_>,
+    ) -> Self {
+        progress.report(0.0);
         let handles: HashSet<_> = handle_segments.iter().copied().collect();
         let stacks: HashMap<_, _> = dump
             .threads
@@ -102,6 +113,7 @@ impl NativeMemory {
             mmapped_bytes: 0,
         };
         for (i, seg) in dump.segments.iter().enumerate() {
+            progress.portion(0.0, 0.3).items(i, dump.segments.len());
             let (category, detail) =
                 classify(dump, &mut cursor, heap, i, &handles, &stacks, executable);
             if category == "malloc heap"
@@ -128,9 +140,13 @@ impl NativeMemory {
                 non_zero_bytes: 0,
             });
         }
+        let scanned = progress
+            .portion(0.3, 1.0)
+            .counter(memory.mappings.iter().map(|m| m.size()).sum());
         memory.mappings.par_iter_mut().for_each(|m| {
-            m.non_zero_bytes = non_zero_bytes(dump, m.start, m.end);
+            m.non_zero_bytes = non_zero_bytes_with_progress(dump, m.start, m.end, &scanned);
         });
+        progress.report(1.0);
         memory
     }
     pub fn categories(&self) -> Vec<Category> {
@@ -199,9 +215,19 @@ impl NativeMemory {
 }
 
 pub fn non_zero_bytes(dump: &CoreDump, start: u64, end: u64) -> u64 {
+    non_zero_bytes_with_progress(dump, start, end, &|_| {})
+}
+
+fn non_zero_bytes_with_progress(
+    dump: &CoreDump,
+    start: u64,
+    end: u64,
+    progress: &impl Fn(u64),
+) -> u64 {
     let (mut total, mut counted) = (0, None);
     dump.scan(start, end, |address, bytes| {
         let mut at = 0;
+        let mut reported = 0;
         while at < bytes.len() {
             let page = (address + at as u64 - start) / 4096;
             let page_start = start + page * 4096;
@@ -211,7 +237,12 @@ pub fn non_zero_bytes(dump: &CoreDump, start: u64, end: u64) -> u64 {
                 total += 4096.min(end - page_start);
             }
             at = next;
+            if at - reported >= 1 << 20 {
+                progress((at - reported) as u64);
+                reported = at;
+            }
         }
+        progress((at - reported) as u64);
     });
     total
 }

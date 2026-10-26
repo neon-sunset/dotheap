@@ -83,6 +83,7 @@ final class PageContainer: NSView {
 }
 
 private struct SectionPage: View {
+    @AppStorage("typeNameStyle") private var typeNameStyle = TypeNameStyle.standard
     let snapshot: HeapSnapshot
     let section: Section
 
@@ -106,5 +107,6 @@ private struct SectionPage: View {
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
+        .environment(\.typeNameStyle, typeNameStyle)
     }
 }

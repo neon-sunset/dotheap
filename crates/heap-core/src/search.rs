@@ -39,15 +39,9 @@ pub struct SearchResult {
     pub bytes: u64,
 }
 
-impl ChunkGroup {
-    pub fn id(&self) -> String {
-        format!("{}/{}", self.reach as u8, self.label)
-    }
-}
-
 impl HeapSnapshot {
     pub fn chunk_groups(&self) -> Result<Arc<Vec<ChunkGroup>>> {
-        self.saved("native groups", || self.native_graph()?.groups(self))
+        self.saved("native groups v5", || self.native_graph()?.groups(self))
     }
 
     pub fn search(&self, query: &str, limit_per_kind: usize) -> Result<Vec<SearchResult>> {
@@ -217,16 +211,17 @@ impl HeapSnapshot {
                             kind: SearchKind::Native,
                             title: group.label.clone(),
                             detail: format!(
-                                "{}{} chunks, held by {}",
+                                "{}{}; {} chunks, held by {}",
                                 group
                                     .library
                                     .as_ref()
                                     .map(|s| format!("{s}, "))
                                     .unwrap_or_default(),
+                                group.kind.title(),
                                 group.chunks.len(),
                                 group.reach.holder()
                             ),
-                            target: SearchTarget::NativeGroup(group.id()),
+                            target: SearchTarget::NativeGroup(group.id.clone()),
                             bytes: group.bytes,
                         },
                     ));

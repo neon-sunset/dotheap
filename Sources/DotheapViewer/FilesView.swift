@@ -193,7 +193,7 @@ private struct FileDetail: View {
                     }
                     RootPath(snapshot: snapshot, object: o.ownerObject ?? o.stream ?? o.handle)
                 }
-                .padding(10)
+                .padding(PageInsets.detail)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }

@@ -97,7 +97,19 @@ impl std::ops::Deref for CoreDump {
 
 impl CoreDump {
     pub fn open(path: &Path, directory: Option<&Path>, layout: Option<Layout>) -> Result<Self> {
-        let source = Source::open(path, directory)?;
+        Self::open_with_progress(path, directory, layout, crate::progress::Progress::none())
+    }
+
+    pub(crate) fn open_with_progress(
+        path: &Path,
+        directory: Option<&Path>,
+        layout: Option<Layout>,
+        progress: crate::progress::Progress<'_>,
+    ) -> Result<Self> {
+        progress.report(0.0);
+        let source = Source::open_with_progress(path, directory, progress.portion(0.0, 0.9))?;
+        let progress = progress.named("Reading dump headers");
+        progress.report(0.9);
         let saved = layout.is_some();
         let mut dump = Self {
             path: path.to_owned(),
@@ -133,6 +145,7 @@ impl CoreDump {
             return Err(Error::cache("invalid cached core layout"));
         }
         dump.check()?;
+        progress.report(1.0);
         Ok(dump)
     }
 

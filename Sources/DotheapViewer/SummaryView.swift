@@ -278,12 +278,12 @@ extension MemoryTree {
         let cached = g.cachedBytes
         func node(_ id: String, _ name: String, _ detail: String, _ list: [NativeGraph.ChunkGroup], _ color: Color) -> MemoryNode {
             MemoryNode(id: "malloc/" + id, name: name, detail: detail, bytes: list.reduce(0) { $0 + $1.bytes }, color: color) {
-                list.map { grp in MemoryNode(id: "malloc/" + id + "/" + grp.id, name: grp.label, detail: "\(grp.chunks.count) chunks, held by " + grp.reach.holder, bytes: grp.bytes, color: color.opacity(0.75)) }
+                list.map { grp in MemoryNode(id: "malloc/" + id + "/" + grp.id, name: grp.label, detail: "\(grp.kind.title), \(grp.chunks.count) chunks, held by " + grp.reach.holder, bytes: grp.bytes, color: color.opacity(0.75)) }
             }
         }
         var nodes: [MemoryNode] = []
         let byLibrary = Dictionary(grouping: groups.filter { $0.library != nil }) { $0.library! }
-        for (lib, list) in byLibrary { nodes.append(node("lib/" + lib, lib, "chunks held by C++ objects of " + lib, list, Palette.hashed(lib))) }
+        for (lib, list) in byLibrary { nodes.append(node("lib/" + lib, lib, "identified types and reference sources in " + lib, list, Palette.hashed(lib))) }
         let rest = groups.filter { $0.library == nil }
         nodes.append(node("managed", "Held by managed objects", "chunks only managed objects point to: live, pending finalization or dead", rest.filter { $0.reach == .liveManaged || $0.reach == .pendingManaged || $0.reach == .deadManaged }, Palette.live))
         nodes.append(node("unreferenced", "Unreferenced", "leak candidates: no pointer to them anywhere in the dump", rest.filter { $0.reach == .unreferenced }, Color(red: 0.90, green: 0.30, blue: 0.35)))

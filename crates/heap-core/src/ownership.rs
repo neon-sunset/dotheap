@@ -6,7 +6,7 @@ use crate::{
     compressed::atomic_write,
     graph::{CompressedRows, DominatorGraph, RootKind, dominators, valid_parent_forest},
     handles,
-    native_graph::NativeGraph,
+    native_graph::{ChunkAttributionKind, NativeGraph},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -25,6 +25,7 @@ pub enum OwnershipNode {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnershipSaved {
+    format: u32,
     pub source_names: Vec<String>,
     pub object_base: usize,
     pub chunk_base: usize,
@@ -37,6 +38,7 @@ pub struct OwnershipGraph {
     pub retained_native: Column<u64>,
     pub children_rows: CompressedRows,
     pub parent: Column<i32>,
+    pub source_rows: CompressedRows,
 }
 impl std::ops::Deref for OwnershipGraph {
     type Target = OwnershipSaved;
@@ -47,10 +49,28 @@ impl std::ops::Deref for OwnershipGraph {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OwnershipGroup {
     pub name: String,
+    pub kind: Option<ChunkAttributionKind>,
+    pub library: Option<String>,
     pub nodes: Vec<usize>,
     pub size: u64,
     pub managed: u64,
     pub native: u64,
+}
+pub struct OwnershipRoot {
+    pub node: usize,
+    pub name: String,
+    pub objects: usize,
+    pub chunks: usize,
+    pub managed: u64,
+    pub native: u64,
+}
+#[derive(Default)]
+pub struct OwnershipTypeGroup {
+    pub name: String,
+    pub type_id: Option<u32>,
+    pub objects: usize,
+    pub bytes: u64,
+    pub nodes: Vec<usize>,
 }
 impl OwnershipGroup {
     pub fn total(&self) -> u64 {
@@ -60,6 +80,82 @@ impl OwnershipGroup {
 impl HeapSnapshot {
     pub fn ownership(&self) -> Result<Arc<OwnershipGraph>> {
         self.memo("ownership graph", || OwnershipGraph::open(self))
+    }
+    pub fn type_retained(&self) -> Result<Arc<Vec<u64>>> {
+        self.saved("type retained with native memory v2", || {
+            let graph = self.ownership()?;
+            let mut retained = vec![0; self.heap.types.len()];
+            let mut on_path = vec![0usize; retained.len()];
+            let mut stack = vec![(0, 0)];
+            while let Some((node, child)) = stack.last_mut() {
+                if let Some(&next) = graph.children_rows.row(*node).get(*child) {
+                    *child += 1;
+                    let next = next as usize;
+                    if let OwnershipNode::Object(object) = graph.node(next) {
+                        let ty = self.heap.type_ids[object] as usize;
+                        if on_path[ty] == 0 {
+                            retained[ty] += graph.retained(next);
+                        }
+                        on_path[ty] += 1;
+                    }
+                    stack.push((next, 0));
+                } else {
+                    let (node, _) = stack.pop().unwrap();
+                    if let OwnershipNode::Object(object) = graph.node(node) {
+                        on_path[self.heap.type_ids[object] as usize] -= 1;
+                    }
+                }
+            }
+            Ok(retained)
+        })
+    }
+    pub fn ownership_instances(&self, type_id: u32, limit: usize) -> Result<Vec<usize>> {
+        let graph = self.ownership()?;
+        let mut objects: Vec<_> = (0..self.heap.count())
+            .filter(|&i| self.heap.type_ids[i] == type_id)
+            .collect();
+        objects.sort_by(|&a, &b| {
+            graph
+                .retained(graph.object_node(b))
+                .cmp(&graph.retained(graph.object_node(a)))
+                .then(self.heap.size(b).cmp(&self.heap.size(a)))
+                .then(a.cmp(&b))
+        });
+        objects.truncate(limit);
+        Ok(objects)
+    }
+    pub fn ownership_dominator_types(&self, type_id: u32) -> Result<Vec<OwnershipTypeGroup>> {
+        let graph = self.ownership()?;
+        let mut groups = HashMap::<_, OwnershipTypeGroup>::new();
+        for i in (0..self.heap.count())
+            .filter(|&i| self.heap.type_ids[i] == type_id && self.graph.live[i] != 0)
+        {
+            let node = graph.object_node(i);
+            let dominator = graph.idom[node];
+            if dominator < 0 {
+                continue;
+            }
+            let dominator = dominator as usize;
+            let name = self.ownership_name(dominator)?;
+            let g = groups
+                .entry(name.clone())
+                .or_insert_with(|| OwnershipTypeGroup {
+                    name,
+                    type_id: match graph.node(dominator) {
+                        OwnershipNode::Object(i) => Some(self.heap.type_ids[i]),
+                        _ => None,
+                    },
+                    ..Default::default()
+                });
+            g.objects += 1;
+            g.bytes += graph.retained(node);
+            if g.nodes.len() < 300 && !g.nodes.contains(&dominator) {
+                g.nodes.push(dominator);
+            }
+        }
+        let mut groups: Vec<_> = groups.into_values().collect();
+        groups.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.name.cmp(&b.name)));
+        Ok(groups)
     }
     pub fn ownership_name(&self, v: usize) -> Result<String> {
         let graph = self.ownership()?;
@@ -74,14 +170,30 @@ impl HeapSnapshot {
         let compute = || {
             let graph = self.ownership()?;
             let native = self.native_graph()?;
-            let mut groups = BTreeMap::<String, Vec<usize>>::new();
+            let mut groups = BTreeMap::<_, Vec<usize>>::new();
             for n in graph.children(v) {
-                groups.entry(self.ownership_name(n)?).or_default().push(n);
+                let key = match graph.node(n) {
+                    OwnershipNode::Chunk(c) => {
+                        let attribution = native.attribution(c, self)?;
+                        (
+                            3,
+                            attribution.label,
+                            Some(attribution.kind.group_kind()),
+                            attribution.library,
+                        )
+                    }
+                    OwnershipNode::Object(_) => (2, self.ownership_name(n)?, None, None),
+                    OwnershipNode::Source(_) => (1, self.ownership_name(n)?, None, None),
+                    OwnershipNode::Root => (0, self.ownership_name(n)?, None, None),
+                };
+                groups.entry(key).or_default().push(n);
             }
             let mut list: Vec<_> = groups
                 .into_iter()
-                .map(|(name, nodes)| OwnershipGroup {
+                .map(|((_, name, kind, library), nodes)| OwnershipGroup {
                     name,
+                    kind,
+                    library,
                     size: nodes
                         .iter()
                         .map(|&n| match graph.node(n) {
@@ -99,7 +211,7 @@ impl HeapSnapshot {
             Ok(list)
         };
         if v == 0 {
-            self.saved("ownership groups of the root", compute)
+            self.saved("ownership groups of the root v5", compute)
         } else {
             self.memo(format!("ownership groups {v}"), compute)
         }
@@ -116,6 +228,7 @@ impl OwnershipGraph {
         if let Some(dir) = &directory
             && let Ok(bytes) = std::fs::read(dir.join("manifest.json"))
             && let Ok(saved) = serde_json::from_slice::<OwnershipSaved>(&bytes)
+            && saved.format == 2
             && let Ok(graph) = Self::from_saved(saved, &store)
         {
             return Ok(graph);
@@ -137,6 +250,8 @@ impl OwnershipGraph {
                 c.flush()?;
             }
             out.children_rows.items.flush()?;
+            out.source_rows.start.flush()?;
+            out.source_rows.items.flush()?;
             atomic_write(&dir.join("manifest.json"), &serde_json::to_vec(&out.saved)?)?;
         }
         Ok(out)
@@ -149,6 +264,7 @@ impl OwnershipGraph {
             retained_native: store.open("retainedNative")?,
             children_rows: CompressedRows::open(store, "dominatorChildren")?,
             parent: store.open("parent")?,
+            source_rows: CompressedRows::open(store, "rootReferences")?,
         };
         let n = graph.count;
         if graph.idom.len() != n
@@ -158,6 +274,12 @@ impl OwnershipGraph {
             || graph.parent.len() != n
             || graph.children_rows.count() != n
             || graph.object_base != 1 + graph.source_names.len()
+            || graph.source_rows.count() != graph.source_names.len()
+            || graph
+                .source_rows
+                .items
+                .iter()
+                .any(|&v| v < graph.object_base as i32 || v as usize >= n)
             || graph.chunk_base < graph.object_base
             || graph.chunk_base > n
             || graph
@@ -230,6 +352,37 @@ impl OwnershipGraph {
         path.reverse();
         path
     }
+    pub fn roots(&self) -> Vec<OwnershipRoot> {
+        self.source_names
+            .iter()
+            .enumerate()
+            .filter_map(|(source, name)| {
+                let references = self.source_rows.row(source);
+                if references.is_empty() {
+                    return None;
+                }
+                let node = source + 1;
+                let objects = references
+                    .iter()
+                    .filter(|&&n| (n as usize) < self.chunk_base)
+                    .count();
+                Some(OwnershipRoot {
+                    node,
+                    name: name.clone(),
+                    objects,
+                    chunks: references.len() - objects,
+                    managed: self.retained_managed[node],
+                    native: self.retained_native[node],
+                })
+            })
+            .collect()
+    }
+    pub fn root_references(&self, node: usize) -> &[i32] {
+        if node == 0 || node >= self.object_base {
+            return &[];
+        }
+        self.source_rows.row(node - 1)
+    }
     fn new(s: &HeapSnapshot, store: &ColumnStore) -> Result<Self> {
         let native = s.native_graph()?;
         let mut source_index = HashMap::new();
@@ -259,18 +412,22 @@ impl OwnershipGraph {
             if !native.is_used(c as usize) {
                 continue;
             }
-            let key = native
-                .root_source
+            let keys = native
+                .root_sources
                 .get(&c)
-                .map(String::as_str)
-                .unwrap_or("native memory");
-            let mut name = key.to_owned();
-            for prefix in ["stack of thread ", "registers of thread "] {
-                if let Some(tid) = key.strip_prefix(prefix).and_then(|v| v.parse().ok()) {
-                    name = format!("{}{}", &prefix[..prefix.len() - 7], stacks.label(tid));
+                .cloned()
+                .unwrap_or_else(|| vec!["native memory".into()]);
+            let mut indices = Vec::new();
+            for key in keys {
+                let mut name = key.clone();
+                for prefix in ["stack of thread ", "registers of thread "] {
+                    if let Some(tid) = key.strip_prefix(prefix).and_then(|v| v.parse().ok()) {
+                        name = format!("{}{}", &prefix[..prefix.len() - 7], stacks.label(tid));
+                    }
                 }
+                indices.push(source(key, name));
             }
-            native_sources.insert(c, source(key.into(), name));
+            native_sources.insert(c, indices);
         }
         let source_count = source_names.len();
         let object_base = 1 + source_count;
@@ -333,9 +490,27 @@ impl OwnershipGraph {
             }
         }
         let mut source_chunks = vec![Vec::new(); source_count];
-        for (&c, &k) in &native_sources {
-            source_chunks[k].push(c);
+        for (&c, sources) in &native_sources {
+            for &k in sources {
+                source_chunks[k].push(c);
+            }
         }
+        let references: Vec<Vec<i32>> = source_objects
+            .iter()
+            .zip(&source_chunks)
+            .map(|(objects, chunks)| {
+                let mut nodes: Vec<_> = objects
+                    .iter()
+                    .map(|&o| (object_base + o as usize) as i32)
+                    .chain(chunks.iter().map(|&c| (chunk_base + c as usize) as i32))
+                    .collect();
+                nodes.sort_unstable();
+                nodes.dedup();
+                nodes
+            })
+            .collect();
+        let source_rows = CompressedRows::from_rows(&references, store, Some("rootReferences"))?;
+        drop(references);
         let edges = Edges {
             s,
             native: &native,
@@ -393,6 +568,7 @@ impl OwnershipGraph {
         }
         Ok(Self {
             saved: OwnershipSaved {
+                format: 2,
                 source_names,
                 object_base,
                 chunk_base,
@@ -403,6 +579,7 @@ impl OwnershipGraph {
             retained_native,
             children_rows,
             parent,
+            source_rows,
         })
     }
 }
@@ -415,7 +592,7 @@ struct Edges<'a> {
     source_objects: Vec<Vec<i32>>,
     source_chunks: Vec<Vec<i32>>,
     managed_sources: Vec<usize>,
-    native_sources: BTreeMap<i32, usize>,
+    native_sources: BTreeMap<i32, Vec<usize>>,
     skipped: HashSet<(usize, usize)>,
     handle_edges: BTreeMap<i32, Vec<i32>>,
     handle_predecessors: BTreeMap<i32, Vec<i32>>,
@@ -524,7 +701,7 @@ impl DominatorGraph for Edges<'_> {
             }
         } else {
             let c = (v - self.chunk_base) as i32;
-            if let Some(&k) = self.native_sources.get(&c) {
+            for &k in self.native_sources.get(&c).into_iter().flatten() {
                 emit(1 + k);
             }
             for &o in self.native.chunk_owners.get(&c).into_iter().flatten() {

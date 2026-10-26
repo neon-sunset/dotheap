@@ -19,6 +19,7 @@ extension HeapSnapshot {
     public typealias Network = RustHeapCore.Network
     public typealias OpenFile = RustHeapCore.OpenFile
     public typealias OwnershipGroup = RustHeapCore.OwnershipGroup
+    public typealias OwnershipTypeGroup = RustHeapCore.OwnershipTypeGroup
     public typealias RequestInfo = RustHeapCore.RequestInfo
     public typealias SocketEngine = RustHeapCore.SocketEngine
     public typealias SocketInfo = RustHeapCore.SocketInfo
@@ -142,9 +143,8 @@ extension Chunk {
     public var userStart: UInt64 { start + (state == .mapping ? 0 : 16) }
     public var userEnd: UInt64 { start + size + (state == .inUse || state == .cached ? 8 : 0) }
 }
-extension ChunkGroup: Identifiable {
-    public var id: String { "\(reach.rawValue)/\(label)" }
-}
+extension ChunkGroup: Identifiable {}
+extension ChunkSizeGroup: Identifiable { public var id: UInt64 { size } }
 extension Reach: CaseIterable {
     public static let allCases: [Reach] = [.nativeRoots, .liveManaged, .pendingManaged, .deadManaged, .unreferenced]
     public var rawValue: Int { Self.allCases.firstIndex(of: self)! }

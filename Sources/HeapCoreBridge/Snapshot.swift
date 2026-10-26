@@ -19,14 +19,23 @@ public final class HeapSnapshot: @unchecked Sendable {
         let directory: String?
         if case .folder(let path) = cache { directory = path } else { directory = nil }
         bridge = try RustHeapCore.Snapshot.open(path: path, dllFolders: dllFolders, smapsPath: smapsPath,
-            options: options, rebuild: cache == .rebuild, cacheDirectory: directory, progress: progress.map { ProgressHandler(update: $0) })
-        info = try bridge.info()
+            options: options, rebuild: cache == .rebuild, cacheDirectory: directory, progress: progress.map { update in
+                ProgressHandler(update: { phase, fraction in
+                    if phase != "Done" {
+                        update(phase, min(fraction, 0.5) + max(0, fraction - 0.5) * 0.7)
+                    }
+                })
+            })
+        info = try bridge.info(progress: progress.map { update in
+            ProgressHandler(update: { phase, fraction in update(phase, 0.85 + fraction * 0.14) })
+        })
         heap = ManagedHeap(bridge: bridge, info: info)
         graph = HeapGraph(bridge: bridge, info: info)
         dump = CoreDump(bridge: bridge, info: info)
         staticsArrays = Set(info.staticsArrays)
         typeStats = bridge.typeStats()
         residency = bridge.residency()
+        progress?("Done", 1)
     }
 
     public func memoized<T>(_ key: String) -> T? {
@@ -68,6 +77,9 @@ public final class HeapSnapshot: @unchecked Sendable {
     public var ownership: OwnershipGraph {
         get throws { try memo("ownership wrapper") { OwnershipGraph(try bridge.ownership()) } }
     }
+    public var typeRetained: RustArray<UInt64> {
+        get throws { try memo("type retained") { try bridge.typeRetained() } }
+    }
     public var garbage: GarbageGraph {
         get throws { try memo("garbage wrapper") { GarbageGraph(try bridge.garbage()) } }
     }
@@ -77,6 +89,10 @@ public final class HeapSnapshot: @unchecked Sendable {
     public var taskGraphs: TaskGraphs { get throws { try memo("task graphs") { try bridge.taskGraphs().graphs } } }
     public var satoriRegionKinds: RustArray<String> { info.regionKinds }
     public var chunkGroups: RustArray<NativeGraph.ChunkGroup> { get throws { try memo("chunk groups") { try bridge.chunkGroups() } } }
+    public func chunkGroup(containing chunk: Int) throws -> String? {
+        guard chunk >= 0 else { return nil }
+        return try bridge.chunkGroup(chunk: chunk)
+    }
     public var mallocParameters: MallocParameters? { get throws { try memo("malloc parameters") { try bridge.mallocParameters() } } }
 
     public func typeName(ofObject object: Int) -> String { typeStats[Int(heap.typeIDs[object])].name }
@@ -84,6 +100,8 @@ public final class HeapSnapshot: @unchecked Sendable {
     public func instances(ofType type: UInt32, limit: Int) -> RustArray<Int> { bridge.instances(typeId: type, limit: limit) }
     public func referrerTypes(ofType type: UInt32) throws -> RustArray<TypeGroup> { try bridge.referrerTypes(typeId: type) }
     public func dominatorTypes(ofType type: UInt32) throws -> RustArray<TypeGroup> { try bridge.dominatorTypes(typeId: type) }
+    public func ownershipInstances(ofType type: UInt32, limit: Int) throws -> RustArray<Int> { try bridge.ownershipInstances(typeId: type, limit: limit) }
+    public func ownershipDominatorTypes(ofType type: UInt32) throws -> RustArray<OwnershipTypeGroup> { try bridge.ownershipDominatorTypes(typeId: type) }
     public func handleGroups() -> RustArray<HandleGroup> { info.handleGroups }
     public func nodeName(_ node: Int) -> String {
         if node == graph.rootNode { return "roots" }
