@@ -171,7 +171,10 @@ final class NativeMemoryTests: XCTestCase {
             references.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             XCTAssertEqual(session.section, .roots)
             XCTAssertTrue(session.showInspector)
-            try await wait(host) { self.table(host, columns: referenceColumns)?.numberOfColumns == 2 }
+            try await wait(host) {
+                guard let table = self.table(host, columns: referenceColumns) else { return false }
+                return table.numberOfColumns == 2 && (table.enclosingScrollView?.contentSize.width ?? 0) > 190
+            }
             let scroll = try XCTUnwrap(references.enclosingScrollView)
             let sourceScroll = try XCTUnwrap(sources.enclosingScrollView)
             let handleScroll = try XCTUnwrap(handles.enclosingScrollView)
