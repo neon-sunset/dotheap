@@ -69,6 +69,7 @@ fn runtime_signatures_and_words_cross_unaligned_compressed_frames() {
                 threads: Vec::new(),
                 exited_thread_stacks: HashSet::new(),
                 shared_cache_ranges: Vec::new(),
+                residency: None,
             },
         };
         assert_eq!(

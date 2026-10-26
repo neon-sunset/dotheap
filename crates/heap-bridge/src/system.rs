@@ -31,10 +31,50 @@ pub fn smaps_next_to_dump(path: &str) -> Option<String> {
     heap_core::smaps::next_to_dump(Path::new(path)).map(|p| p.to_string_lossy().into_owned())
 }
 
-pub fn default_dump_path(process: &Process) -> Result<String> {
-    Ok(heap_core::live_process::default_dump_path(process)?
-        .to_string_lossy()
-        .into_owned())
+pub fn default_dump_path(process: &Process, runtime: bool) -> Result<String> {
+    Ok(if runtime {
+        heap_core::live_process::default_dump_path(process)?
+    } else {
+        heap_core::live_dump::default_path(process.pid)?
+    }
+    .to_string_lossy()
+    .into_owned())
+}
+
+// Returns the snapshot error when the caller can offer an explicitly paused capture.
+pub fn write_process_dump(
+    process: &Process,
+    path: &str,
+    pause: bool,
+    progress: Box<dyn Progress>,
+) -> Result<Option<String>> {
+    use heap_core::live_dump::{self, CaptureOptions};
+    let phase = |phase: &str| progress.update(phase, 0.0);
+    let status = |status: live_dump::Status| {
+        progress.update(
+            &status.phase,
+            if status.total == 0 {
+                0.0
+            } else {
+                status.done as f64 / status.total as f64
+            },
+        )
+    };
+    let cancelled = || progress.cancelled();
+    match live_dump::write(
+        process.pid,
+        Path::new(path),
+        &CaptureOptions {
+            pause,
+            progress: Some(&phase),
+            status: Some(&status),
+            cancelled: Some(&cancelled),
+        },
+    ) {
+        Ok(_) => Ok(None),
+        Err(error) if error.pause_can_capture => Ok(Some(error.description)),
+        Err(error) => Err(heap_core::Error(error.description).into()),
+    }
 }
 
 pub fn write_runtime_dump(

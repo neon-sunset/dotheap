@@ -62,8 +62,10 @@ struct NativeMemoryView: View {
                         let missing = byKind.mapValues { $0.reduce(UInt64(0)) { t, m in let r = residency.rss[m.start] ?? 0; return t + (m.nonZeroBytes > r ? m.nonZeroBytes - r : 0) } }
                         KindBars(rows: categories.map { ($0.name, $0.bytes, rss[$0.name] ?? 0, missing[$0.name] ?? 0) }, resident: true)
                     } else {
-                        Text(snapshot.smaps == nil ? "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. Add smaps for residency."
-                             : "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. The smaps file does not match the dump, so it is not used here.")
+                        Text(!snapshot.dump.platform.isLinux
+                             ? "Readable mapped memory in the dump, by what it holds. Untouched stack and heap pages count here. See Residency for resident memory."
+                             : snapshot.smaps == nil ? "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. Add a residency file to measure RSS."
+                             : "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. The residency file does not match the dump, so it is not used here.")
                             .font(.callout).foregroundStyle(.secondary)
                         KindBars(rows: categories.map { ($0.name, $0.bytes, 0, 0) }, resident: false)
                     }

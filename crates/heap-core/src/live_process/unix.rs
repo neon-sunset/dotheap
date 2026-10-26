@@ -19,7 +19,7 @@ const MAGIC: &[u8; 14] = b"DOTNET_IPC_V1\0";
 const HEADER_SIZE: usize = 20;
 pub const DUMP_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
-pub fn list() -> Vec<Process> {
+fn diagnostics() -> Vec<Process> {
     let mut folders = vec![PathBuf::from("/tmp")];
     if let Some(folder) = std::env::var_os("TMPDIR").filter(|s| !s.is_empty()) {
         folders.push(folder.into());
@@ -55,15 +55,16 @@ pub fn list() -> Vec<Process> {
                     Process {
                         pid,
                         name: command_line(pid),
-                        socket: entry.path(),
+                        socket: Some(entry.path()),
                         uid: metadata.uid(),
                         gid: metadata.gid(),
+                        memory_bytes: None,
                     },
                 )
             });
             if time > old.0 {
                 old.0 = time;
-                old.1.socket = entry.path();
+                old.1.socket = Some(entry.path());
                 old.1.uid = metadata.uid();
                 old.1.gid = metadata.gid();
             }
@@ -72,6 +73,95 @@ pub fn list() -> Vec<Process> {
     processes
         .into_values()
         .map(|(_, process)| process)
+        .collect()
+}
+
+pub fn list() -> Vec<Process> {
+    let mut processes: BTreeMap<_, _> = diagnostics().into_iter().map(|p| (p.pid, p)).collect();
+    for (pid, uid, gid) in process_ids() {
+        if pid <= 0 || pid == std::process::id() as i32 {
+            continue;
+        }
+        processes.entry(pid).or_insert_with(|| Process {
+            pid,
+            uid,
+            gid,
+            name: command_line(pid),
+            socket: None,
+            memory_bytes: None,
+        });
+    }
+    for process in processes.values_mut() {
+        process.memory_bytes = memory_bytes(process.pid);
+    }
+    processes.into_values().collect()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn memory_bytes(pid: i32) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v0>::uninit();
+    let result =
+        unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V0, info.as_mut_ptr().cast()) };
+    (result == 0).then(|| unsafe { info.assume_init() }.ri_phys_footprint)
+}
+
+#[cfg(target_os = "linux")]
+fn memory_bytes(pid: i32) -> Option<u64> {
+    let statm = fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+    let resident = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    let page_size = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+    resident.checked_mul(page_size)
+}
+
+#[cfg(target_os = "linux")]
+fn process_ids() -> Vec<(i32, u32, u32)> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse().ok()?;
+            let metadata = entry.metadata().ok()?;
+            Some((pid, metadata.uid(), metadata.gid()))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn process_ids() -> Vec<(i32, u32, u32)> {
+    let bytes = unsafe { libc::proc_listpids(1, 0, std::ptr::null_mut(), 0) };
+    if bytes <= 0 {
+        return Vec::new();
+    }
+    let mut pids = vec![0i32; bytes as usize / size_of::<i32>() + 64];
+    let bytes = unsafe {
+        libc::proc_listpids(
+            1,
+            0,
+            pids.as_mut_ptr().cast(),
+            size_of_val(pids.as_slice()) as i32,
+        )
+    };
+    pids.truncate(bytes.max(0) as usize / size_of::<i32>());
+    pids.into_iter()
+        .filter_map(|pid| {
+            let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+            let bytes = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    info.as_mut_ptr().cast(),
+                    size_of::<libc::proc_bsdinfo>() as i32,
+                )
+            };
+            if bytes as usize != size_of::<libc::proc_bsdinfo>() {
+                return None;
+            }
+            let info = unsafe { info.assume_init() };
+            Some((pid, info.pbi_uid, info.pbi_gid))
+        })
         .collect()
 }
 
@@ -274,7 +364,13 @@ fn request_dump(
     in_progress: &mut bool,
 ) -> Result<()> {
     let message = dump_request(path)?;
-    let mut socket = UnixStream::connect(&process.socket).map_err(|error| {
+    let path = process.socket.as_ref().ok_or_else(|| {
+        Error(format!(
+            "process {} has no .NET diagnostics socket",
+            process.pid
+        ))
+    })?;
+    let mut socket = UnixStream::connect(path).map_err(|error| {
         if error.kind() == io::ErrorKind::PermissionDenied {
             Error(format!(
                 "no access to the diagnostics socket of process {} ({error}); run dotheap as the \
@@ -285,7 +381,7 @@ fn request_dump(
             Error(format!(
                 "cannot connect to process {} at {}: {error}",
                 process.pid,
-                process.socket.display()
+                path.display()
             ))
         }
     })?;

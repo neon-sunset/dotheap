@@ -1,12 +1,8 @@
 use super::{CaptureError, Result, meter::Meter};
 use crate::compressed::{BLOCK_SIZE, CompressorPool, seek_table};
 use rayon::prelude::*;
-use std::{
-    collections::VecDeque,
-    fs::{self, File},
-    os::unix::fs::FileExt,
-    path::{Path, PathBuf},
-};
+#[cfg(any(test, target_os = "linux"))]
+use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
 use std::{
     ffi::CString,
@@ -15,14 +11,21 @@ use std::{
         unix::ffi::OsStrExt,
     },
 };
+use std::{
+    fs::{self, File},
+    os::unix::fs::FileExt,
+    path::{Path, PathBuf},
+};
 
 const BATCH: usize = 64;
 const WRITE_INTERVAL: u64 = 64 << 20;
 
 #[derive(Clone, Copy)]
 pub(super) struct Frame {
+    #[cfg(any(test, target_os = "linux"))]
     pub position: u64,
     pub size: usize,
+    #[cfg(any(test, target_os = "linux"))]
     pub offset: u64,
     pub length: usize,
 }
@@ -36,6 +39,7 @@ pub(super) struct CoreFile<'a> {
     pub position: u64,
     file_offset: u64,
     flushed: u64,
+    #[cfg(target_os = "linux")]
     punched: u64,
     checked_at: u64,
     dropped: u64,
@@ -46,8 +50,11 @@ pub(super) struct CoreFile<'a> {
     packed: Vec<Vec<u8>>,
     block_open: bool,
     pub frames: Vec<Frame>,
+    #[cfg(any(test, target_os = "linux"))]
     reads: VecDeque<(usize, Vec<u8>)>,
+    #[cfg(any(test, target_os = "linux"))]
     read_buffer: Vec<u8>,
+    #[cfg(any(test, target_os = "linux"))]
     decoder: zstd::bulk::Decompressor<'static>,
     pool: &'a rayon::ThreadPool,
     meter: &'a Meter,
@@ -78,6 +85,7 @@ impl<'a> CoreFile<'a> {
             position: header_size as u64,
             flushed: header_size as u64,
             file_offset: room as u64,
+            #[cfg(target_os = "linux")]
             punched: 0,
             checked_at: 0,
             dropped: room as u64,
@@ -88,8 +96,11 @@ impl<'a> CoreFile<'a> {
             packed: Vec::new(),
             block_open: false,
             frames: Vec::new(),
+            #[cfg(any(test, target_os = "linux"))]
             reads: VecDeque::new(),
+            #[cfg(any(test, target_os = "linux"))]
             read_buffer: Vec::new(),
+            #[cfg(any(test, target_os = "linux"))]
             decoder: zstd::bulk::Decompressor::new()?,
             pool,
             meter,
@@ -97,6 +108,7 @@ impl<'a> CoreFile<'a> {
         })
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn frame(&self, position: u64) -> Result<usize> {
         let index = self
             .frames
@@ -109,6 +121,7 @@ impl<'a> CoreFile<'a> {
             })
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     fn decompressed(&mut self, index: usize) -> Result<&[u8]> {
         if let Some(slot) = self.reads.iter().position(|(i, _)| *i == index) {
             let entry = self.reads.remove(slot).unwrap();
@@ -139,6 +152,7 @@ impl<'a> CoreFile<'a> {
         Ok(&self.reads.front().unwrap().1)
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn append_from(
         &mut self,
         source: &mut CoreFile<'_>,
@@ -156,7 +170,9 @@ impl<'a> CoreFile<'a> {
                 self.flush()?;
                 self.write(&source.read_buffer, self.file_offset)?;
                 self.frames.push(Frame {
+                    #[cfg(any(test, target_os = "linux"))]
                     position: self.flushed,
+                    #[cfg(any(test, target_os = "linux"))]
                     offset: self.file_offset,
                     ..frame
                 });
@@ -206,6 +222,7 @@ impl<'a> CoreFile<'a> {
         Ok(())
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn append_zeros(&mut self, mut count: u64) -> Result<()> {
         let zero = vec![0; BLOCK_SIZE];
         while count > 0 {
@@ -216,8 +233,47 @@ impl<'a> CoreFile<'a> {
         Ok(())
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn end_frame(&mut self) {
         self.block_open = false;
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn append_parallel(
+        &mut self,
+        mut ranges: impl Iterator<Item = (u64, usize)>,
+        read: impl Fn(u64, &mut [u8]) -> Result<()> + Sync,
+    ) -> Result<()> {
+        self.flush()?;
+        loop {
+            let batch: Vec<_> = ranges.by_ref().take(BATCH).collect();
+            if batch.is_empty() {
+                return Ok(());
+            }
+            for &(_, size) in &batch {
+                let mut block = self.spare_blocks.pop().unwrap_or_default();
+                block.resize(size, 0);
+                self.blocks.push(block);
+            }
+            self.packed.resize_with(batch.len(), Vec::new);
+            self.pool.install(|| {
+                batch
+                    .par_iter()
+                    .zip(&mut self.blocks)
+                    .zip(&mut self.packed)
+                    .try_for_each(|((&(address, _), block), packed)| {
+                        read(address, block)?;
+                        self.compressors.compress(block, packed)?;
+                        Ok::<_, CaptureError>(())
+                    })
+            })?;
+            self.write_blocks()?;
+            let size = batch.iter().map(|&(_, size)| size as u64).sum::<u64>();
+            self.position += size;
+            if self.counts_done {
+                self.meter.done(size);
+            }
+        }
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -230,13 +286,19 @@ impl<'a> CoreFile<'a> {
                 .zip(&mut self.packed)
                 .try_for_each(|(bytes, packed)| self.compressors.compress(bytes, packed))
         })?;
+        self.write_blocks()
+    }
+
+    fn write_blocks(&mut self) -> Result<()> {
         let packed = std::mem::take(&mut self.packed);
         for (i, bytes) in packed.iter().take(self.blocks.len()).enumerate() {
             let size = self.blocks[i].len();
             self.write(bytes, self.file_offset)?;
             self.frames.push(Frame {
+                #[cfg(any(test, target_os = "linux"))]
                 position: self.flushed,
                 size,
+                #[cfg(any(test, target_os = "linux"))]
                 offset: self.file_offset,
                 length: bytes.len(),
             });
@@ -253,10 +315,12 @@ impl<'a> CoreFile<'a> {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     pub fn disk_bytes(&self) -> u64 {
         self.file_offset - self.punched.saturating_sub(self.room as u64)
     }
 
+    #[cfg(target_os = "linux")]
     pub fn punch(&mut self, offset: u64) {
         #[cfg(target_os = "linux")]
         {
@@ -431,13 +495,13 @@ pub(super) fn check_free_space(path: &Path) -> Result<()> {
         )));
     }
     let stat = unsafe { stat.assume_init() };
-    let free = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
+    let free = u128::from(stat.f_bavail) * u128::from(stat.f_frsize);
     if free < 2 << 30 {
         return Err(CaptureError::terminal(format!(
             "the file system of {} has {} free; dotheap stops at 2 GB so that the dump does not \
                 fill the disk. Write the dump to another file system with --out",
             folder.display(),
-            crate::checks::format_size(free)
+            crate::checks::format_size(free as u64)
         )));
     }
     Ok(())

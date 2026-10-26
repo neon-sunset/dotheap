@@ -20,7 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard file == nil, session.dumpPath == nil, !session.loading else { return }
         let defaults = UserDefaults.standard
         if let pid = defaults.string(forKey: "pid").flatMap(Int32.init) {
-            if let p = LiveProcess.list().first(where: { $0.pid == pid }) { session.open(process: p) } else { session.error = "process \(pid) has no diagnostics socket" }
+            if let p = LiveProcess.list().first(where: { $0.pid == pid }) { session.open(process: p) } else { session.error = "process \(pid) is no longer running" }
             return
         }
         guard let dump = defaults.string(forKey: "dump") else { return }
@@ -104,7 +104,7 @@ private struct ViewerCommands: Commands {
             Button("Open Dump…") { OpenPanel.chooseDump(session, openWindow: openWindow) }.keyboardShortcut("o")
             Button("Dump Running Process…") { session?.showProcesses = true }
                 .keyboardShortcut("o", modifiers: [.command, .shift]).disabled(session == nil)
-            Button("Add smaps File…") { if let session { OpenPanel.chooseSmaps(session) } }.disabled(session?.dumpPath == nil)
+            Button("Add Residency File…") { if let session { OpenPanel.chooseSmaps(session) } }.disabled(session?.dumpPath == nil)
             Button("Download Runtime Symbols") { session?.downloadSymbols() }
                 .disabled(session?.snapshot.map { !$0.dump.platform.isLinux } ?? true || session?.symbolDownload != nil)
                 .help("Downloads the debug files of the .NET runtime libraries from Microsoft's symbol server, so that native frames have function names")
@@ -198,7 +198,7 @@ enum OpenPanel {
 
     @MainActor static func chooseSmaps(_ session: Session) {
         let panel = NSOpenPanel()
-        panel.title = "Choose /proc/<pid>/smaps of the dumped process (.zst and .gz allowed)"
+        panel.title = "Choose smaps or vmmap output recorded near the capture (.zst and .gz allowed)"
         guard panel.runModal() == .OK, let url = panel.url, let dump = session.dumpPath else { return }
         session.open(dump: dump, smaps: url.path, dlls: session.dllFolder)
     }
@@ -218,8 +218,8 @@ struct ContentView: View {
                     ProgressView(value: session.fraction) { Text(session.phase) }
                         .frame(width: 360)
                     Text(session.dumpPath ?? "").font(.caption).foregroundStyle(.secondary)
-                    if session.converting {
-                        Button("Cancel", action: session.cancelConversion)
+                    if session.converting || session.canCancelCapture {
+                        Button("Cancel", action: session.cancelOpen)
                     }
                 }
             } else if let error = session.snapshot?.dump.readError {
@@ -339,32 +339,61 @@ private struct NavigationToolbar: ToolbarContent {
     }
 }
 
-/// Running .NET processes this user can dump; the chosen one is dumped through its diagnostics socket and opened.
+private extension LiveProcess.Process {
+    var memoryForSorting: UInt64 { memoryBytes ?? 0 }
+}
+
+/// Running processes grouped by .NET diagnostics availability.
 struct ProcessListView: View {
     @Environment(Session.self) private var session
     @State private var processes: RustArray<LiveProcess.Process> = RustArray()
     @State private var selected: Int32?
-    @State private var order = [KeyPathComparator(\LiveProcess.Process.pid)]
+    @State private var runtimeCapture = false
+    @State private var filter = ""
+    @State private var order = [KeyPathComparator(\LiveProcess.Process.memoryForSorting, order: .reverse)]
+
+    private func matches(_ process: LiveProcess.Process) -> Bool {
+        filter.isEmpty || process.name.localizedCaseInsensitiveContains(filter) || String(process.pid).contains(filter)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Dump a running .NET process").font(.headline)
-            Text("Capture a full dump in the cache folder and open it. The runtime writes it through the same diagnostics protocol as dotnet-dump collect --type Full. The process pauses until the write finishes.")
+            HStack {
+                Text("Dump a running process").font(.headline)
+                Spacer()
+                TextField("Filter by name or PID", text: $filter).textFieldStyle(.roundedBorder).frame(width: 220)
+            }
+            Text("Capture a kernel snapshot in the cache folder and open it. The process continues while the dump is written. If a snapshot is unavailable, Dotheap asks before pausing the process for capture.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Table(processes.sorted(using: order), selection: $selected, sortOrder: $order) {
-                TableColumn("PID", value: \LiveProcess.Process.pid) { Text(String($0.pid)).monospacedDigit() }.width(min: 50, ideal: 70)
-                TableColumn("Program", value: \LiveProcess.Process.name) { Text($0.name) }
-                TableColumn("User", value: \LiveProcess.Process.uid) { Text(String($0.uid)).monospacedDigit() }.width(min: 40, ideal: 60)
+            Table(of: LiveProcess.Process.self, selection: $selected, sortOrder: $order) {
+                TableColumn("PID", value: \LiveProcess.Process.pid) { Text(String($0.pid)).monospacedDigit() }.width(70)
+                TableColumn("Program", value: \LiveProcess.Process.name) { Text($0.name).help($0.name) }
+                TableColumn("Memory", value: \LiveProcess.Process.memoryForSorting) {
+                    Text($0.memoryBytes.map(Format.bytes) ?? "—").monospacedDigit()
+                        .help("Physical memory footprint, including compressed memory.")
+                }.width(110)
+                TableColumn("User", value: \LiveProcess.Process.uid) { Text(String($0.uid)).monospacedDigit() }.width(60)
+            } rows: {
+                SwiftUI.Section(".NET applications") {
+                    ForEach(processes.filter { $0.socket != nil && matches($0) }.sorted(using: order)) { TableRow($0) }
+                }
+                SwiftUI.Section("Other applications") {
+                    ForEach(processes.filter { $0.socket == nil && matches($0) }.sorted(using: order)) { TableRow($0) }
+                }
             }
             .frame(minHeight: 220)
             HStack {
                 Button("Refresh") { processes = LiveProcess.list() }
+                Toggle("Pause for .NET runtime dump", isOn: $runtimeCapture)
+                    .toggleStyle(.checkbox)
+                    .disabled(processes.first(where: { $0.pid == selected })?.socket == nil)
+                    .help("Request the dump through .NET diagnostics. The process stays paused until the raw dump is written.")
                 Spacer()
                 Button("Cancel") { session.showProcesses = false }.keyboardShortcut(.cancelAction)
                 Button("Dump and Open") {
                     guard let p = processes.first(where: { $0.pid == selected }) else { return }
                     session.showProcesses = false
-                    session.open(process: p)
+                    session.open(process: p, runtime: runtimeCapture)
                 }
                 .keyboardShortcut(.defaultAction).disabled(selected == nil)
             }
@@ -372,6 +401,7 @@ struct ProcessListView: View {
         .padding(16)
         .frame(width: 620, height: 400)
         .onAppear { processes = LiveProcess.list() }
+        .onChange(of: selected) { _, _ in runtimeCapture = false }
     }
 }
 

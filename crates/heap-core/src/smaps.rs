@@ -19,6 +19,15 @@ pub struct SmapsMapping {
     pub swap: u64,
     pub readable: bool,
 }
+
+pub(crate) const MACH_NOTE_OWNER: &[u8; 16] = b"dotheap.resident";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapturedResidency {
+    pub version: u32,
+    pub physical_footprint: Option<u64>,
+    pub mappings: Vec<SmapsMapping>,
+}
 fn dump_name(path: &Path) -> String {
     let mut name = path.to_string_lossy().into_owned();
     for suffix in [".zst", ".dmp"] {

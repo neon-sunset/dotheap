@@ -45,6 +45,8 @@ This means you can use `dotheap dump` on live applications with huge heaps with 
 
 In such scenarios, `dotheap dump` writes `dmp.zst` and `smaps.zst` files. The dump is written as 256KiB blocks compressed into ZSTD frames. CLI and Viewer then work directly on this format, indexing and caching produced analysis without ever fully decompressing potentially dozens of gigabytes of data.
 
+_On Apple silicon macOS_, Dotheap uses kernel copy-on-write snapshots: the application keeps running while the dump is written, without requiring .NET IPC. It produces the same compressed dump format, with residency data included in the dump.
+
 ## Install
 
 - **macOS 15+:** `brew install --cask neon-sunset/tap/dotheap` builds the CLI and Viewer from
@@ -112,10 +114,10 @@ dotheap dump 4321 --out core.dmp.zst
 dotheap summary --pid 4321
 ```
 
-Process discovery and capture are supported on Linux and macOS. `ps` finds .NET diagnostics
-sockets in `TMPDIR` and `/tmp`; diagnostics must be enabled and the socket accessible. `--pid`
-captures first, then runs the selected analysis command. `--out` and `--offline` also apply.
-On macOS, capture requires `--offline`.
+Process discovery and capture are supported on Linux and macOS. `ps` lists running processes
+and identifies .NET applications by diagnostics sockets in `TMPDIR` and `/tmp`. `--pid`
+captures first, then runs the selected analysis command. `--out`, `--pause` and `--offline` also apply.
+Linux and Apple silicon macOS default to live capture; .NET diagnostics are only needed for `--offline`.
 
 ### Live Linux capture
 
@@ -132,10 +134,21 @@ Capture fails if the process exits or replaces its address space before the fina
 required memory or register read fails at the final stop. Deleting a mapped file does not by itself
 make its memory unreadable. Deleted mappings are identified by `files` and in the Viewer.
 
+### Live macOS capture
+
+On Apple silicon, Dotheap takes a kernel copy-on-write snapshot. The process keeps running while
+the snapshot is read and compressed. Capture needs macOS debugger access; protected applications
+can deny access even as root. Translated x86 processes are not supported. Device I/O mappings
+are omitted because reading them can affect the device.
+
+If the kernel cannot create a snapshot, `--pause` suspends the process until the dump is written.
+The Viewer asks before using this fallback. Cancellation, failure or termination of Dotheap
+releases the suspension. Other processes can still change shared memory during capture.
+
 ### Runtime capture
 
-With `--offline`, Dotheap asks the .NET runtime to write a full dump. This is the only capture mode
-available on macOS. **The process stays paused for the entire raw-dump write.** For large heaps,
+With `--offline` (or **Pause for .NET runtime dump** in the Viewer), Dotheap asks the .NET runtime
+to write a full dump. **The process stays paused for the entire raw-dump write.** For large heaps,
 this makes runtime capture impractical
 on services that must keep serving traffic.
 
@@ -143,6 +156,7 @@ on services that must keep serving traffic.
 dotheap dump 4321 --offline --out core.dmp.zst
 ```
 
+Diagnostics must be enabled and the socket accessible.
 Run as the target user or root. The runtime writes as the target user, who must have permission
 to write to the output directory. Compression starts after the process resumes. A filename without
 `.zst` keeps the raw dump. If compression or publication fails, the error gives the raw dump's
@@ -157,14 +171,16 @@ When root requests a runtime dump of another user's process, the default is a ne
 
 Live capture always writes Zstandard data. Progress, disk use and pause times go to stderr;
 stdout receives the completed path, or `{"dump":"<path>"}` with `--json`. Linux capture also saves
-smaps beside the dump for [resident-memory analysis](#resident-memory).
+smaps beside the dump for [resident-memory analysis](#resident-memory); macOS embeds this data in the dump.
+Full dumps include readable shared-library mappings, so their contents can be much larger than
+the process's physical footprint.
 
-Live capture needs space for the compressed output and temporary copies. It checks free space
-periodically and stops below 2 GiB available to non-root users. Pages copied at the final stop
+Live capture needs space for the compressed output and, on Linux, temporary copies. It checks free space
+periodically and stops below 2 GiB available to non-root users. On Linux, pages copied at the final stop
 can spill to disk when memory is limited, which lengthens the pause. Runtime capture needs space
 for both the full raw dump and its compressed output until compression finishes.
 
-Dotheap makes itself a preferred OOM victim, but cannot guarantee the target survives memory
+On Linux, Dotheap makes itself a preferred OOM victim, but cannot guarantee the target survives memory
 pressure. Temporary files can remain after a forced termination on filesystems without unnamed
 file support. See [Live capture implementation](docs/capture.md) for the copying procedure,
 resource limits and cleanup behaviour.
@@ -196,6 +212,7 @@ Native-only Linux processes get mapping, thread and glibc malloc analysis. This 
 and Rust programs using glibc's allocator. Go's managed heap is outside malloc, so its dumps
 primarily provide mappings and stacks. Musl and other allocators have no chunk analysis; macOS
 malloc zones are not walked. Glibc analysis has been verified on 2.36 and 2.39.
+Native-only macOS processes get mapping and thread analysis.
 
 ### Symbols and metadata
 
@@ -242,7 +259,7 @@ a binary only if its build ID matches, or its first page matches when no build I
 | `collections`, `strings`, `zero-arrays`, `boxed`, `finalizable` | Collection capacity, duplicate strings, mostly zero arrays, boxed values and finalizer states. |
 | `findings` | Heap integrity, potential leaks, blocked work and inefficient memory use, with commands for detailed reports. |
 | `verify` | Invalid object, type and runtime structures, with field addresses and values. Works without the reference graph. |
-| `ps`, `dump <pid>` | Discover local .NET processes or capture one. Linux defaults to live capture. Runtime capture requires `--offline`, including on macOS. |
+| `ps`, `dump <pid>` | Discover local processes or capture one. Linux and Apple silicon macOS default to live capture. Runtime capture requires `--offline`. |
 | `cache`, `symbols` | List or remove analysis caches; download matching .NET runtime symbols. |
 | `report` | A full text report, also available as `dotheap core.dmp`. Uses `--top` rather than `--limit`; see `dotheap help report`. |
 
@@ -277,6 +294,8 @@ prove a leak. Async analysis targets the .NET 10 state-machine model, not .NET 1
 Open `.dmp` or `.zst` files from Finder or **File > Open Dump…**. Each dump has its own window,
 navigation and selections. Opening the same dump again brings its window forward. Opening an
 smaps file selects the dump beside it.
+Use **File > Dump Running Process…** to capture a running application and open the dump.
+The list groups .NET and other applications separately.
 
 Select a managed object or native allocation to inspect it in the sidebar. Dominators and Roots
 include both kinds, with links to their references and root paths. Native Memory separates allocation
@@ -298,8 +317,9 @@ Other startup options include `-smaps <file>`, `-type <name>`, `-object <address
 
 ## Resident memory
 
-A dump records memory contents, not RSS or physical page sizes. Supply `/proc/<pid>/smaps` on
-Linux or `vmmap <pid>` output on macOS, taken close to the dump:
+Memory contents alone do not record RSS or physical page sizes. Live capture also records
+residency, in a smaps file on Linux and inside the dump on macOS. For other dumps, supply
+`/proc/<pid>/smaps` on Linux or `vmmap -wide <pid>` output on macOS, taken close to the dump:
 
 ```sh
 dotheap summary core.dmp --smaps core.smaps
@@ -307,11 +327,17 @@ dotheap summary core.dmp --smaps core.smaps
 
 `.gz` and `.zst` are accepted. Without `--smaps`, Dotheap tries `<name>.smaps.zst`, `.smaps.gz`, then
 `.smaps` beside `<name>.dmp.zst` or `<name>.dmp`. Linux capture saves smaps after the target resumes.
+An external file overrides embedded residency.
 
-With matching residency data, process totals and memory grouped by kind, stack, malloc heap and
+For Linux dumps with matching residency data, process totals and memory grouped by kind, stack, malloc heap and
 mapped file use RSS. On mismatch, a warning explains why, those views use dump estimates, and the
 Residency view still shows the supplied data. Zero-filled heap pages make estimates uncertain:
 they can be resident after writes or because a huge page backs them.
+
+For macOS dumps, the Residency view shows resident, private and compressed or swapped pages by
+region category. Physical footprint is shown separately: shared pages can occur in several
+mappings, so their sum is not the process's physical footprint. Capture records region residency
+before copying memory and physical footprint just before the snapshot.
 
 Matching checks reject obvious differences; they cannot prove the files describe the same instant.
 Residency can change between captures. The [analysis reference](docs/analysis.md#residency-and-storage)
@@ -398,7 +424,7 @@ The Viewer needs macOS 15+, Xcode 16 or later with Swift 6, and Python 3. The bu
 links the Rust core statically into the app:
 
 ```sh
-scripts/make-app.sh
+scripts/build-macos.sh
 open Dotheap.app
 ```
 

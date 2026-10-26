@@ -6,8 +6,10 @@ use std::{
 
 #[cfg(unix)]
 mod unix;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) use unix::ensure_absent;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use unix::memory_bytes;
 #[cfg(unix)]
 pub use unix::{DUMP_DEADLINE, command_line, default_dump_path, list, write_dump};
 #[cfg(windows)]
@@ -19,9 +21,10 @@ pub use windows::{command_line, default_dump_path, list, write_dump};
 pub struct Process {
     pub pid: i32,
     pub name: String,
-    pub socket: PathBuf,
+    pub socket: Option<PathBuf>,
     pub uid: u32,
     pub gid: u32,
+    pub memory_bytes: Option<u64>,
 }
 
 pub fn file_name(process: &Process) -> String {

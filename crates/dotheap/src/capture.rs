@@ -24,11 +24,17 @@ pub fn capture(pid: &str, arguments: &Arguments) -> Result<PathBuf, CliError> {
             message: format!("{pid} is not a process id"),
             status: 2,
         })?;
+    if arguments.flag("--offline") && arguments.flag("--pause") {
+        return Err(CliError {
+            message: "choose either --offline or --pause".into(),
+            status: 2,
+        });
+    }
     let progress = ProgressLine::new();
     if arguments.flag("--offline") {
         let process = live_process::list()
             .into_iter()
-            .find(|p| p.pid == pid)
+            .find(|p| p.pid == pid && p.socket.is_some())
             .ok_or_else(|| {
                 Error(format!(
                     "process {pid} has no diagnostics socket in the temporary folder \
@@ -69,7 +75,7 @@ pub fn capture(pid: &str, arguments: &Arguments) -> Result<PathBuf, CliError> {
     } else {
         if !live_dump::SUPPORTED {
             return Err(Error(
-                "live capture requires Linux; pass --offline to request a .NET runtime dump.\n\
+                "direct capture requires Linux or macOS on Apple silicon; pass --offline to request a .NET runtime dump.\n\
                  Runtime capture pauses the process until the raw dump is written."
                     .into(),
             )
@@ -84,6 +90,7 @@ pub fn capture(pid: &str, arguments: &Arguments) -> Result<PathBuf, CliError> {
         let status = |status| progress.show(status);
         let cancelled = || CANCELLED.load(Ordering::Relaxed);
         let options = CaptureOptions {
+            pause: arguments.flag("--pause"),
             progress: Some(&line),
             status: Some(&status),
             cancelled: Some(&cancelled),
@@ -98,7 +105,13 @@ pub fn capture(pid: &str, arguments: &Arguments) -> Result<PathBuf, CliError> {
                 } else {
                     "add --offline".into()
                 };
-                let message = if error.runtime_can_write {
+                let message = if error.pause_can_capture {
+                    format!("{error}\nUse --pause to suspend the process until capture finishes.")
+                } else if error.runtime_can_write
+                    && live_process::list()
+                        .iter()
+                        .any(|p| p.pid == pid && p.socket.is_some())
+                {
                     format!(
                         "{error}\nTo use .NET runtime capture, {retry}\n\
                          The process stays paused until the raw dump is written."

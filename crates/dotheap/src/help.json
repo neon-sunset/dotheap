@@ -183,9 +183,9 @@
     {
       "name": "ps",
       "usage": "",
-      "summary": "running .NET processes found through diagnostics sockets",
+      "summary": "running processes, with .NET diagnostics sockets when available",
       "options": [],
-      "details": "Lists PID, user, program and diagnostics socket for .NET processes found\nin TMPDIR and /tmp. Diagnostics must be enabled; capture needs permission\nto use the socket.\nProcess discovery and capture are supported on Linux and macOS."
+      "details": "Lists PID, user, program, runtime and diagnostics socket on Linux and macOS.\n.NET processes are identified by diagnostics sockets in TMPDIR and /tmp;\nprocesses with diagnostics disabled appear among other processes.\nDirect capture needs permission to read the process."
     },
     {
       "name": "dump",
@@ -193,9 +193,10 @@
       "summary": "capture a process and print the dump path",
       "options": [
         "--out <path>      output file or folder (also -o); defaults to the cache folder",
-        "--offline         let the .NET runtime write the dump; pauses for the raw dump write"
+        "--offline         let the .NET runtime write the dump; pauses for the raw dump write",
+        "--pause           macOS: pause the process for the entire capture"
       ],
-      "details": "On Linux, Dotheap copies memory while the process runs, then pauses its\nthreads to read registers and finish the copy. File and shared mappings\nare read again during this pause. Busy processes, large heaps, low memory\nand slow storage can cause long pauses. Other processes can still change\nshared memory. Requires ptrace access: usually root, or the target user\nwith suitable process permissions and kernel.yama.ptrace_scope.\n\nRuntime capture requires --offline, including on macOS. It uses the same\n.NET diagnostics protocol as dotnet-dump. The process stays paused until\nthe raw dump is written. Run as the target user or root; the target user\nmust be able to write to the output directory. Dotheap never switches to\nruntime capture automatically when live capture is unavailable or fails.\n\n--out accepts a filename or an existing directory, relative to dotheap's\nworking directory. A directory gets <program>-<pid>-<time>.dmp.zst.\nThe default is the cache's live folder. When root requests a runtime dump\nof another user's process, the default is a new directory in /tmp.\nExisting files are never replaced.\n\nLinux live capture always writes Zstandard data. Runtime capture compresses\nafter the process resumes, unless the output name omits .zst. If compression\nor publication fails, the error gives the raw dump's recovery path.\nLinux capture also saves <name>.smaps.zst beside <name>.dmp[.zst] for resident\nmemory analysis; it is loaded automatically.\n\nCapture fails if the process exits, replaces its address space or cannot\nbe read at the final pause. Live capture needs space for temporary copies\nbeside the output. Periodic free-space checks stop capture below 2 GiB.\nRuntime capture needs space for both the raw and compressed dump.\nThe completed path goes to stdout, or {\"dump\":\"<path>\"} with --json.\nProgress goes to stderr, including the pause count, total pause time\nand longest pause."
+      "details": "On Linux, Dotheap copies memory while the process runs, then pauses its\nthreads to read registers and finish the copy. File and shared mappings\nare read again during this pause. Busy processes, large heaps, low memory\nand slow storage can cause long pauses. Other processes can still change\nshared memory. Requires ptrace access: usually root, or the target user\nwith suitable process permissions and kernel.yama.ptrace_scope.\n\nOn Apple silicon macOS, Dotheap captures a kernel copy-on-write snapshot\nand writes it directly as compressed Mach-O data. If the kernel cannot\ncreate a snapshot, --pause explicitly permits a capture with the process\npaused until the write finishes. It is never selected automatically.\nShared memory can still change in other processes. macOS debugger access\nis required; protected applications may deny access even as root.\nTranslated x86 processes are not supported. Device I/O mappings are omitted.\n\nRuntime capture requires --offline. It uses the same\n.NET diagnostics protocol as dotnet-dump. The process stays paused until\nthe raw dump is written. Run as the target user or root; the target user\nmust be able to write to the output directory. Dotheap never switches to\nruntime capture automatically when live capture is unavailable or fails.\n\n--out accepts a filename or an existing directory, relative to dotheap's\nworking directory. A directory gets <program>-<pid>-<time>.dmp.zst.\nThe default is the cache's live folder. When root requests a runtime dump\nof another user's process, the default is a new directory in /tmp.\nExisting files are never replaced.\n\nDirect capture always writes Zstandard data. Runtime capture compresses\nafter the process resumes, unless the output name omits .zst. If compression\nor publication fails, the error gives the raw dump's recovery path.\nLinux capture also saves <name>.smaps.zst beside <name>.dmp[.zst] for resident\nmemory analysis; it is loaded automatically.\n\nCapture fails if the process exits, replaces its address space or cannot\nbe read at the final pause. Live capture needs space for temporary copies\nbeside the output. Periodic free-space checks stop capture below 2 GiB.\nRuntime capture needs space for both the raw and compressed dump.\nThe completed path goes to stdout, or {\"dump\":\"<path>\"} with --json.\nProgress goes to stderr, including the pause count, total pause time\nand longest pause."
     },
     {
       "name": "search",
@@ -348,7 +349,7 @@
     "--rebuild         process the dump again in the default cache",
     "--native-roots    count pointers in writable native memory as managed roots\n                    conservative: stale pointers can keep otherwise dead objects live",
     "--progress        print processing phases to stderr; warnings are always printed",
-    "--pid <pid>       capture and analyze instead of <core>; --out and --offline apply\n                    see dotheap help dump for permissions, output paths and pauses"
+    "--pid <pid>       capture and analyze instead of <core>; --out, --pause and --offline apply\n                    see dotheap help dump for permissions, output paths and pauses"
   ],
   "groups": [
     {

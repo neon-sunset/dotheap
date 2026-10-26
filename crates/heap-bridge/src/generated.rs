@@ -1870,7 +1870,7 @@ pub unsafe extern "C" fn dh_Process_name(pointer: *const c_void) -> *const c_voi
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_Process_socket(pointer: *const c_void) -> *const c_void {
-    unsafe { (&(*pointer.cast::<Process>()).socket as *const PathBuf).cast() }
+    unsafe { (&(*pointer.cast::<Process>()).socket as *const Option<PathBuf>).cast() }
 }
 
 #[unsafe(no_mangle)]
@@ -1881,6 +1881,11 @@ pub unsafe extern "C" fn dh_Process_uid(pointer: *const c_void) -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_Process_gid(pointer: *const c_void) -> u32 {
     unsafe { (*pointer.cast::<Process>()).gid }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_Process_memory_bytes(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<Process>()).memory_bytes as *const Option<u64>).cast() }
 }
 
 #[unsafe(no_mangle)]
@@ -2769,6 +2774,13 @@ pub unsafe extern "C" fn dh_SnapshotInfo_cache_directory(pointer: *const c_void)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_SnapshotInfo_smaps_path(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<SnapshotInfo>()).smaps_path as *const Option<String>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_SnapshotInfo_physical_footprint(
+    pointer: *const c_void,
+) -> *const c_void {
+    unsafe { (&(*pointer.cast::<SnapshotInfo>()).physical_footprint as *const Option<u64>).cast() }
 }
 
 #[unsafe(no_mangle)]
@@ -5307,11 +5319,31 @@ pub unsafe extern "C" fn dh_smaps_next_to_dump(path: Slice) -> Outcome {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dh_default_dump_path(process: *const c_void) -> Outcome {
+pub unsafe extern "C" fn dh_default_dump_path(process: *const c_void, runtime: bool) -> Outcome {
     unsafe {
         ffi::call(|| {
             Ok(Owned::new(crate::system::default_dump_path(
                 &*process.cast::<Process>(),
+                runtime,
+            )?))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_write_process_dump(
+    process: *const c_void,
+    path: Slice,
+    pause: bool,
+    progress: ffi::Progress,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(crate::system::write_process_dump(
+                &*process.cast::<Process>(),
+                ffi::string(path),
+                pause,
+                Box::new(progress),
             )?))
         })
     }

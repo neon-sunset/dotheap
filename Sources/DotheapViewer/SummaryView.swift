@@ -349,7 +349,7 @@ enum Treemap {
 }
 
 enum SummaryMode: String, CaseIterable, Identifiable {
-    case kind = "Kind of memory", owner = "Owner (managed and native)", residency = "Residency (smaps)"
+    case kind = "Kind of memory", owner = "Owner (managed and native)", residency = "Residency"
     var id: String { rawValue }
 }
 

@@ -20,9 +20,19 @@ public enum LiveProcess {
     public typealias Process = RustHeapCore.Process
     public static func list() -> RustArray<Process> { RustHeapCore.processes() }
     public static func absolute(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
-    public static func defaultDumpPath(for process: Process) throws -> String { try RustHeapCore.defaultDumpPath(process: process) }
-    public static func writeDump(_ process: Process, to path: String) throws {
-        try RustHeapCore.writeRuntimeDump(process: process, path: path, progress: nil)
+    public static func defaultDumpPath(for process: Process, runtime: Bool = false) throws -> String { try RustHeapCore.defaultDumpPath(process: process, runtime: runtime) }
+    public static func writeDump(_ process: Process, to path: String, pause: Bool = false,
+                                 progress: @escaping (String, Double) -> Void,
+                                 cancelled: @escaping () -> Bool) throws -> String? {
+        try RustHeapCore.writeProcessDump(process: process, path: path, pause: pause,
+            progress: ProgressHandler(update: { phase, fraction in
+                progress(phase.prefix(1).uppercased() + phase.dropFirst(), fraction)
+            }, cancelled: cancelled))
+    }
+    public static func writeRuntimeDump(_ process: Process, to path: String,
+                                        progress: @escaping (String, Double) -> Void) throws {
+        try RustHeapCore.writeRuntimeDump(process: process, path: path,
+            progress: ProgressHandler(update: progress))
     }
 }
 

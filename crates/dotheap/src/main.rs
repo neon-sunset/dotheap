@@ -80,7 +80,19 @@ fn run() -> Result<u8, CliError> {
                         ("pid", Value::Id(p.pid as i64)),
                         ("user", Value::Id(p.uid as i64)),
                         ("program", text(&p.name)),
-                        ("socket", text(p.socket.to_string_lossy())),
+                        (
+                            "runtime",
+                            text(if p.socket.is_some() { ".NET" } else { "other" }),
+                        ),
+                        (
+                            "socket",
+                            text(
+                                p.socket
+                                    .as_ref()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                            ),
+                        ),
                     ])
                 })),
             )])

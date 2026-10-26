@@ -205,7 +205,7 @@ struct OccupancyChart: View {
     }
 }
 
-/// Resident memory by mapping kind, from smaps.
+/// Resident memory by mapping kind.
 struct ResidencyView: View {
     @Environment(Session.self) private var session
     let snapshot: HeapSnapshot
@@ -214,6 +214,7 @@ struct ResidencyView: View {
     typealias Row = ResidencyCategory
 
     var body: some View {
+        let macos = !snapshot.dump.platform.isLinux
         if snapshot.smaps != nil {
             let heap = snapshot.heap
             let rows = snapshot.residencyCategories
@@ -223,9 +224,13 @@ struct ResidencyView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     MetricRow {
-                        Metric(title: "Process RSS", value: Format.mb(processRss))
+                        if let footprint = snapshot.physicalFootprint {
+                            Metric(title: "Physical footprint", value: Format.mb(footprint), detail: "includes compressed memory")
+                        }
+                        Metric(title: macos ? "Resident mappings" : "Process RSS", value: Format.mb(processRss),
+                               detail: macos ? "includes shared pages" : nil)
                         Metric(title: "Heap RSS", value: Format.mb(heapRss), detail: Format.percent(Double(heapRss), Double(t.committed)) + " of committed")
-                        Metric(title: "Live objects", value: Format.mb(t.live), detail: Format.percent(Double(t.live), Double(heapRss)) + " of heap RSS, " + Format.percent(Double(t.live), Double(processRss)) + " of process RSS", color: Palette.live)
+                        Metric(title: "Live objects", value: Format.mb(t.live), detail: Format.percent(Double(t.live), Double(heapRss)) + " of heap RSS" + (macos ? "" : ", " + Format.percent(Double(t.live), Double(processRss)) + " of process RSS"), color: Palette.live)
                     }
                     Chart(rows.filter { $0.rss > 1 << 20 }) { r in
                         BarMark(x: .value("MB", Double(r.huge) / 1_048_576), y: .value("Mapping", r.name))
@@ -234,27 +239,30 @@ struct ResidencyView: View {
                             .foregroundStyle(by: .value("Pages", "Regular pages"))
                     }
                     .chartForegroundStyleScale(["Huge pages": Color.blue.opacity(0.7), "Regular pages": Palette.free])
+                    .chartLegend(macos ? .hidden : .visible)
                     .chartXAxisLabel("RSS MB")
                     .frame(height: CGFloat(rows.filter { $0.rss > 1 << 20 }.count) * 30 + 50)
                     TextTable(rows: rows, columns: [
                         .init("Mapping", width: 300, flexible: true, value: \.name, text: \.name, help: { $0.name }),
-                        .init("VMAs", width: 60, font: .digits, value: \.vmas, text: { "\($0.vmas)" }),
+                        .init(macos ? "Regions" : "VMAs", width: 60, font: .digits, value: \.vmas, text: { "\($0.vmas)" }),
                         .init("Size", width: 100, font: .digits, value: \.size, text: { Format.mb($0.size) }),
                         .init("RSS", width: 100, font: .digits, value: \.rss, text: { Format.mb($0.rss) }),
-                        .init("THP", width: 100, font: .digits, value: \.huge, text: { Format.mb($0.huge) }),
-                        .init("Swap", width: 100, font: .digits, value: \.swap, text: { Format.mb($0.swap) }),
+                    ] + (macos ? [] : [.init("THP", width: 100, font: .digits, value: \.huge, text: { Format.mb($0.huge) })]) + [
+                        .init(macos ? "Compressed / swapped" : "Swap", width: macos ? 150 : 100, font: .digits, value: \.swap, text: { Format.mb($0.swap) }),
                     ], sort: $order)
                     .frame(minHeight: 320)
-                    Text("smaps is read from \(snapshot.smapsPath ?? "") and joined with the mappings in the dump.")
+                    Text(snapshot.smapsPath.map { "Residency data: \($0)" } ?? "Residency was recorded before copying the snapshot's memory. Shared pages can appear in several mappings; their sum is not the process's physical footprint.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
         } else {
             VStack(spacing: 12) {
-                Text("No smaps file").font(.title2)
-                Text("The dump has no residency data. Add /proc/<pid>/smaps of the dumped process to see RSS, huge pages and the share of each mapping.")
+                Text("No residency data").font(.title2)
+                Text(macos
+                     ? "New Dotheap captures include macOS residency data. For this dump, add vmmap -wide <pid> output recorded near the capture. Residency cannot be reconstructed from a dump's memory contents."
+                     : "Add /proc/<pid>/smaps recorded near the capture to see RSS, huge pages and the share of each mapping.")
                     .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 480)
-                Button("Add smaps File…") { OpenPanel.chooseSmaps(session) }
+                Button("Add Residency File…") { OpenPanel.chooseSmaps(session) }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

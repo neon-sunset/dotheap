@@ -52,6 +52,7 @@ pub struct SnapshotInfo {
     pub from_cache: bool,
     pub cache_directory: Option<String>,
     pub smaps_path: Option<String>,
+    pub physical_footprint: Option<u64>,
     pub residency_categories: Vec<ResidencyCategory>,
     pub versions: Versions,
     pub total: RegionStats,
@@ -247,6 +248,7 @@ impl Snapshot {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             residency_categories,
+            physical_footprint: s.dump.residency.as_ref().and_then(|r| r.physical_footprint),
             versions: s.versions(),
             total: s.totals(),
             generations: s.by_generation(),

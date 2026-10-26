@@ -285,6 +285,7 @@ pub fn parse(raw: &[String]) -> Result<Parsed, String> {
         "--dead",
         "--diagnostics",
         "--offline",
+        "--pause",
     ];
     let mut given = Vec::new();
     let mut k = 0;
@@ -329,7 +330,7 @@ pub fn parse(raw: &[String]) -> Result<Parsed, String> {
     }
     let c = command(&a.command);
     let mut allowed = option_names(&HELP.common);
-    allowed.extend(["--offline", "--out"]);
+    allowed.extend(["--offline", "--pause", "--out"]);
     if let Some(c) = c {
         allowed.extend(option_names(&c.options));
     } else {
