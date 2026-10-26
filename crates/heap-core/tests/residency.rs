@@ -87,6 +87,7 @@ fn captured_macos_residency_survives_caching_and_allows_an_external_override() {
     )
     .unwrap();
     assert_eq!(snapshot.smaps.as_ref().unwrap()[0].rss, 32768);
+    drop(snapshot);
     bytes[136..144].copy_from_slice(&u64::MAX.to_le_bytes());
     fs::write(&path, &bytes).unwrap();
     assert!(CoreDump::open(&path, None, None).is_err());
