@@ -107,8 +107,8 @@ case "$platform" in Linux*)
     "$bin" native "$dump" --json --limit 0 > native.json
     "$bin" finalizer-backlog "$dump" --json --limit 0 > backlog.json
     "$bin" native-held-by-dead "$dump" --json --limit 0 > held-by-dead.json
-    "$python" - <<'PY'
-import json
+    "$python" - "$bin" "$dump" <<'PY'
+import json, subprocess, sys
 native = json.load(open("native.json"))
 backlog = json.load(open("backlog.json"))
 heldByDead = json.load(open("held-by-dead.json"))
@@ -116,12 +116,16 @@ def check(ok, what):
     print(("ok    " if ok else "FAIL  ") + what)
     if not ok: raise SystemExit(1)
 # A stale word in native memory (a field of a later allocation that reuses freed memory) can reach a leaked block.
-leaked = sum(g["chunks"] for g in native["groups"] if g["heldBy"].startswith("nothing") and g["label"].startswith("8208-byte"))
+leaked = 0
+for group in native["groups"]:
+    if group["heldBy"].startswith("nothing"):
+        detail = json.loads(subprocess.check_output([sys.argv[1], "native", sys.argv[2], "--group", group["id"], "--json", "--limit", "0"]))
+        leaked += sum(size["chunks"] for size in detail["sizes"] if size["size"] == 8208)
 check(leaked >= 395, f"the 400 leaked 8 KB blocks are unreferenced, apart from a few that a stale word reaches ({leaked})")
 # Chunks that objects own through the field, whatever else holds them: stale words on stacks and in library data can
 # also point to a block, which then counts as held by native roots.
 def owned(field, held=""):
-    return sum(g["chunks"] for g in native["groups"] if g["label"].startswith("referenced by " + field) and g["heldBy"].startswith(held))
+    return sum(g["chunks"] for g in native["groups"] if g["identifiedBy"] == "Managed referrer" and g["label"] == field and g["heldBy"].startswith(held))
 handles, pending = owned("Shop.MallocHandle.handle"), owned("Shop.MallocHandle.handle", "managed objects pending finalization")
 check(handles == 80 and handles - pending >= 50, f"80 MallocHandles own a 64 KB chunk each, 50 of them live ({handles}, {pending} held only by ones pending finalization)")
 check(owned("Shop.NativeBuffer.Data") == 200, f"200 NativeBuffers own a 4 KB chunk each ({owned('Shop.NativeBuffer.Data')})")
