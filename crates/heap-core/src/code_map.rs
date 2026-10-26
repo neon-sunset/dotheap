@@ -25,6 +25,15 @@ pub struct Location {
     pub kind: LocationKind,
     pub name: String,
 }
+impl Location {
+    pub fn display_name(&self) -> String {
+        if self.kind == LocationKind::Managed {
+            short(&self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+}
 pub struct CodeMap {
     dump: Arc<CoreDump>,
     names: Arc<TypeNames>,
@@ -411,7 +420,7 @@ impl CodeMap {
         if mt == 0 {
             return None;
         }
-        let name = short(&self.names.name(mt));
+        let name = self.names.name(mt);
         let flags = self
             .dump
             .u16(md.checked_add(self.off("MethodDesc", "Flags").unwrap_or(6))?)

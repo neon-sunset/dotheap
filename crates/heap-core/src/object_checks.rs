@@ -116,7 +116,7 @@ impl HeapSnapshot {
         let ip = self.dump.u64(data + 16)?;
         Some(
             code.locate(ip)
-                .map(|l| l.name)
+                .map(|l| l.display_name())
                 .unwrap_or_else(|| format!("0x{ip:x}")),
         )
     }

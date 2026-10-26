@@ -311,7 +311,7 @@ impl HeapSnapshot {
             });
             Ok(findings)
         };
-        self.saved("summary findings v4", compute)
+        self.saved("summary findings v5", compute)
     }
 
     pub fn field(&self, i: usize, name: &str) -> Option<FieldValue> {
@@ -399,7 +399,7 @@ impl HeapSnapshot {
             if let Some(p) = self.integer(d, name).filter(|&p| p != 0)
                 && let Some(l) = code.locate(p as u64)
             {
-                return Ok(Some(l.name));
+                return Ok(Some(l.display_name()));
             }
         }
         Ok(None)
@@ -412,7 +412,7 @@ impl HeapSnapshot {
             {
                 return Ok(Some(format!(
                     "{}{}",
-                    l.name,
+                    l.display_name(),
                     code.source(p as u64)
                         .map(|s| format!(" ({s})"))
                         .unwrap_or_default()

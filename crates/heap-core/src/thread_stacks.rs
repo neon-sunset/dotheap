@@ -225,7 +225,7 @@ impl ThreadStacks {
     pub fn describe(&self, a: u64) -> String {
         self.code
             .locate(a)
-            .map(|l| l.name)
+            .map(|l| l.display_name())
             .unwrap_or_else(|| format!("0x{a:x}"))
     }
     pub fn top_frames(&self, t: &ThreadInfo, count: usize) -> Vec<String> {
@@ -249,7 +249,7 @@ impl ThreadStacks {
             .iter()
             .filter_map(|&a| self.code.locate(a))
             .find(|l| l.kind == LocationKind::Managed)
-            .map(|l| l.name)
+            .map(|l| l.display_name())
             .or_else(|| {
                 addresses
                     .iter()

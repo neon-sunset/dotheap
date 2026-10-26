@@ -121,7 +121,7 @@ impl HeapSnapshot {
             }
             Ok(report)
         };
-        self.saved("check blocked", compute)
+        self.saved("check blocked v2", compute)
     }
 
     pub fn cancellation_check(&self) -> Result<Arc<CheckReport>> {

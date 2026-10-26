@@ -1,6 +1,6 @@
 use crate::{
     Result, analysis::HeapSnapshot, checks::BLOCKING_FRAMES, code_map::LocationKind,
-    symbols::file_name,
+    symbols::file_name, type_names::short,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -60,13 +60,27 @@ pub struct StackNode {
 pub fn is_runtime_frame(n: &str) -> bool {
     n.starts_with("System.")
         || n.starts_with("Microsoft.")
-        || n.starts_with("Task")
         || n.starts_with("0x")
         || n.contains(".so")
         || n.contains(".dylib")
         || n.contains("runtime stub")
         || n.starts_with("system library")
 }
+
+fn wait_frames(names: &[String]) -> Option<(usize, Option<usize>)> {
+    let mut blocking =
+        (0..names.len()).filter(|&k| BLOCKING_FRAMES.iter().any(|s| names[k].contains(s)));
+    let mut wait = blocking.next()?;
+    for next in blocking {
+        if !names[wait + 1..next].iter().all(|n| is_runtime_frame(n)) {
+            break;
+        }
+        wait = next;
+    }
+    let caller = (wait + 1..names.len()).find(|&i| !is_runtime_frame(&names[i]));
+    Some((wait, caller))
+}
+
 impl HeapSnapshot {
     pub fn thread_states(&self) -> Result<Arc<Vec<ThreadState>>> {
         let compute = || {
@@ -96,31 +110,24 @@ impl HeapSnapshot {
                     let addresses: Vec<_> = std::iter::once(t.instruction_pointer)
                         .chain(t.frames.iter().map(|f| f.return_address))
                         .collect();
-                    let names: Vec<_> = addresses.iter().map(|&a| stacks.describe(a)).collect();
+                    let names: Vec<_> = addresses
+                        .iter()
+                        .map(|&a| {
+                            stacks
+                                .code
+                                .locate(a)
+                                .map(|l| l.name)
+                                .unwrap_or_else(|| format!("0x{a:x}"))
+                        })
+                        .collect();
                     let pool = names.iter().any(|n| {
                         n.contains("ThreadPoolWorkQueue.Dispatch")
                             || n.contains("WorkerThread.WorkerThreadStart")
                     }) || t.name.as_ref().is_some_and(|n| n.contains("TP Worker"));
-                    let blocking: Vec<_> = (0..names.len())
-                        .filter(|&k| BLOCKING_FRAMES.iter().any(|s| names[k].contains(s)))
-                        .collect();
                     let (mut wait, mut wait_frame, mut idle) = (None, None, false);
-                    if let Some(&first) = blocking.first() {
-                        let mut k = first;
-                        while let Some(&next) = blocking.iter().find(|&&i| i > k) {
-                            if !names[k + 1..next].iter().all(|n| is_runtime_frame(n)) {
-                                break;
-                            }
-                            k = next;
-                        }
-                        wait = Some(names[k].clone());
-                        wait_frame = Some(
-                            names[k + 1..]
-                                .iter()
-                                .find(|n| !is_runtime_frame(n))
-                                .cloned()
-                                .unwrap_or("-".into()),
-                        );
+                    if let Some((blocking, caller)) = wait_frames(&names) {
+                        wait = Some(short(&names[blocking]));
+                        wait_frame = Some(caller.map(|i| short(&names[i])).unwrap_or("-".into()));
                     } else if pool
                         && names
                             .iter()
@@ -181,7 +188,7 @@ impl HeapSnapshot {
                 })
                 .collect())
         };
-        self.saved("thread states", compute)
+        self.saved("thread states v2", compute)
     }
     pub fn thread_groups(&self) -> Result<Vec<ThreadGroup>> {
         let states = self.thread_states()?;
@@ -222,7 +229,10 @@ impl HeapSnapshot {
                                 .unwrap_or_default()
                         )
                     } else {
-                        t.frames.last().cloned().unwrap_or("no frames".into())
+                        t.frames
+                            .last()
+                            .map(|n| short(n))
+                            .unwrap_or("no frames".into())
                     };
                     activities.entry(title).or_default().push(t.tid);
                 }
@@ -237,7 +247,7 @@ impl HeapSnapshot {
                         .then(a.title.cmp(&b.title))
                 });
                 ThreadGroup {
-                    function,
+                    function: short(&function),
                     threads: list.iter().map(|t| t.tid).collect(),
                     activities,
                 }
@@ -297,7 +307,7 @@ impl HeapSnapshot {
                 children.sort_by_key(|n| std::cmp::Reverse(n.threads.len()));
                 StackNode {
                     id,
-                    frames,
+                    frames: frames.iter().map(|name| short(name)).collect(),
                     threads: nodes[index].threads.clone(),
                     children,
                 }
@@ -310,6 +320,56 @@ impl HeapSnapshot {
             roots.sort_by_key(|n| std::cmp::Reverse(n.threads.len()));
             Ok(roots)
         };
-        self.saved("merged stacks", compute)
+        self.saved("merged stacks v2", compute)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code_map::Location;
+
+    #[test]
+    fn framework_frames_do_not_split_a_task_wait() {
+        for framework in [
+            "System.Collections.Generic.List`1<System.__Canon>.set_Capacity",
+            "System.Collections.Concurrent.ConcurrentDictionary`2<System.String, System.Object>.TryAdd",
+            "System.Text.RegularExpressions.Symbolic.SymbolicRegexMatcher`1<System.UInt64>.FindMatch",
+        ] {
+            let names = [
+                "System.Threading.Monitor.Wait",
+                framework,
+                "libcoreclr.so+0x4738dc",
+                "System.Threading.ManualResetEventSlim.Wait",
+                "System.Threading.Tasks.Task.SpinThenBlockingWait",
+                "System.Threading.Tasks.Task.Wait",
+                "Program.Run",
+            ]
+            .map(str::to_owned);
+            assert_eq!(wait_frames(&names), Some((5, Some(6))));
+            let location = Location {
+                kind: LocationKind::Managed,
+                name: names[5].clone(),
+            };
+            assert_eq!(location.display_name(), "Task.Wait");
+        }
+    }
+
+    #[test]
+    fn application_frames_stop_the_wait_chain() {
+        for application in [
+            "Shop.Worker.Run",
+            "TaskProcessor.Run",
+            "List`1<Shop.Item>.Wait",
+        ] {
+            let names = [
+                "System.Threading.Monitor.Wait",
+                application,
+                "System.Threading.Tasks.Task.Wait",
+                "Program.Run",
+            ]
+            .map(str::to_owned);
+            assert_eq!(wait_frames(&names), Some((0, Some(1))));
+        }
     }
 }
