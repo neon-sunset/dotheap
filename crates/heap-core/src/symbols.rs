@@ -233,9 +233,22 @@ pub(crate) fn debug_paths(
         .collect()
 }
 
-pub(crate) fn cache_identity(dump: &CoreDump) -> String {
+#[cfg(test)]
+fn cache_identity(dump: &CoreDump) -> String {
+    cache_identity_with_progress(dump, crate::progress::Progress::none())
+}
+
+pub(crate) fn cache_identity_with_progress(
+    dump: &CoreDump,
+    progress: crate::progress::Progress<'_>,
+) -> String {
+    progress.report(0.0);
     let mut files = std::collections::BTreeSet::new();
-    for file in dump.files.iter().filter(|f| f.file_offset == 0) {
+    for (i, file) in dump.files.iter().enumerate() {
+        progress.items(i, dump.files.len());
+        if file.file_offset != 0 {
+            continue;
+        }
         if let Some(id) = elf_build_id(dump, file.start) {
             let name = file_name(Path::new(&file.path));
             for path in debug_paths(&name, &id, &file.path, &HashMap::new()) {
@@ -248,6 +261,7 @@ pub(crate) fn cache_identity(dump: &CoreDump) -> String {
             files.insert(identity);
         }
     }
+    progress.report(1.0);
     files.into_iter().collect::<Vec<_>>().join("\n")
 }
 fn lookup(symbols: &[Symbol], address: u64) -> Option<&Symbol> {

@@ -10,6 +10,7 @@ use crate::{
     },
     type_names::{property_name, without_namespaces},
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -23,6 +24,10 @@ pub struct AsyncAnalysis {
 }
 
 impl HeapSnapshot {
+    pub fn async_check(&self) -> Result<Arc<CheckReport>> {
+        self.saved("check async", || Ok(self.async_analysis()?.report.clone()))
+    }
+
     pub fn async_analysis(&self) -> Result<Arc<AsyncAnalysis>> {
         let compute = || {
             let mut graph = AsyncGraph::new(self)?;
@@ -726,21 +731,34 @@ impl<'a> AsyncGraph<'a> {
                 || s.contains("+DebugFinalizableAsyncStateMachineBox`1<")
         });
         let mut continuations = Vec::new();
-        for task in snapshot.objects(&graph.task_types) {
-            let Some(flags) = snapshot.integer(task, "m_stateFlags").map(|v| v as u32) else {
-                continue;
-            };
+        let tasks: Vec<_> = snapshot
+            .objects(&graph.task_types)
+            .into_par_iter()
+            .filter_map(|task| {
+                let flags = snapshot.integer(task, "m_stateFlags")? as u32;
+                let (continuation, method) = if flags & COMPLETED == 0 {
+                    (
+                        snapshot.target(task, "m_continuationObject"),
+                        boxes
+                            .contains(&snapshot.heap.type_ids[task])
+                            .then(|| graph.read_method(task, snapshot.field_values(task))),
+                    )
+                } else {
+                    (None, None)
+                };
+                Some((task, flags, continuation, method))
+            })
+            .collect();
+        for (task, flags, continuation, method) in tasks {
             graph.flags.insert(task, flags);
             if flags & COMPLETED != 0 {
                 continue;
             }
-            if let Some(continuation) = snapshot.target(task, "m_continuationObject") {
+            if let Some(continuation) = continuation {
                 continuations.push((task, continuation));
             }
-            if boxes.contains(&snapshot.heap.type_ids[task]) {
-                graph
-                    .methods
-                    .insert(task, graph.read_method(task, snapshot.field_values(task)));
+            if let Some(method) = method {
+                graph.methods.insert(task, method);
             }
         }
         for object in snapshot.objects(&graph.pooled_types) {
@@ -1181,6 +1199,45 @@ mod tests {
     use super::*;
     use crate::{cache::CacheChoice, graph::AnalysisOptions};
     use std::{path::Path, process::Command};
+
+    #[test]
+    fn cached_findings_do_not_load_the_task_graph() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/generate-compatibility-fixtures.py");
+        assert!(
+            Command::new(if cfg!(windows) { "python" } else { "python3" })
+                .arg(script)
+                .arg(directory.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let open = || {
+            HeapSnapshot::open(
+                &directory.path().join("reference-rooted.dmp"),
+                Vec::new(),
+                None,
+                AnalysisOptions::default(),
+                CacheChoice::Folder(directory.path().join("cache")),
+                |_, _| {},
+            )
+            .unwrap()
+        };
+        let expected = serde_json::to_value(open().async_check().unwrap().as_ref()).unwrap();
+        let snapshot = open();
+        assert!(
+            snapshot
+                .memo::<AsyncAnalysis>("async graphs", || Err(Error(
+                    "task graph must not load".into()
+                )))
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(snapshot.async_check().unwrap().as_ref()).unwrap(),
+            expected
+        );
+    }
 
     fn method(name: &str, awaited: Option<usize>) -> Method {
         Method {

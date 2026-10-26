@@ -85,6 +85,26 @@ final class SnapshotTests: XCTestCase {
         }
     }
 
+    func testOpenProgressIncludesViewPreparationForNewAndCachedDumps() throws {
+        let path = directory.appendingPathComponent("reference-rooted.dmp").path
+        let cache = CacheChoice.folder(directory.appendingPathComponent("progress-cache").path)
+        for cached in [false, true] {
+            var updates: [(String, Double)] = []
+            let snapshot = try HeapSnapshot(path: path, cache: cache) { phase, fraction in
+                updates.append((phase, fraction))
+            }
+            XCTAssertEqual(snapshot.fromCache, cached)
+            XCTAssertEqual(updates.first?.1, 0)
+            XCTAssertEqual(updates.last?.0, "Done")
+            XCTAssertEqual(updates.last?.1, 1)
+            XCTAssertEqual(updates.first { $0.0 == "Reading dump headers" }?.1, 0.45)
+            XCTAssertEqual(updates.first { $0.0 == (cached ? "Opening cached objects" : "Walking the heap") }?.1, 0.5)
+            XCTAssertTrue(updates.contains { $0.0 == "Preparing the view" && $0.1 < 1 })
+            XCTAssertTrue(updates.dropLast().allSatisfy { $0.1 >= 0 && $0.1 < 1 })
+            XCTAssertTrue(zip(updates, updates.dropFirst()).allSatisfy { $0.1 <= $1.1 })
+        }
+    }
+
     func testOwnershipGroupsIncludeObjectSizes() throws {
         let snapshot = try open("reference-rooted")
         let graph = try snapshot.ownership
@@ -263,6 +283,46 @@ final class SnapshotTests: XCTestCase {
         let bytes = try XCTUnwrap(snapshot.dump.bytes(snapshot.heap.addresses[0], 8))
         let methodTable = bytes.enumerated().reduce(UInt64(0)) { $0 | UInt64($1.element) << ($1.offset * 8) }
         XCTAssertEqual(methodTable, snapshot.heap.methodTable(0).address)
+    }
+
+    func testNativeGroupsSizesAndReferencesUseTheSameChunks() throws {
+        let snapshot = try open("native-allocations")
+        let graph = try snapshot.nativeGraph
+        let groups = try snapshot.chunkGroups
+        XCTAssertEqual(groups.count, 2)
+        let group = try XCTUnwrap(groups.first { $0.reach == .nativeRoots })
+        XCTAssertEqual(group.kind, .nativeRoot)
+        XCTAssertEqual(group.bytes, 16384)
+        XCTAssertEqual(group.minSize, 4096)
+        XCTAssertEqual(group.maxSize, 8192)
+        let sizes = try graph.chunkSizes(group.chunks)
+        XCTAssertEqual(sizes.map(\.size), [8192, 4096])
+        XCTAssertEqual(sizes.map(\.count), [1, 2])
+        XCTAssertEqual(sizes.map(\.bytes), [8192, 8192])
+        XCTAssertEqual(try graph.largestChunks(group.chunks, size: 4096, limit: 500).map { graph.chunks[Int($0)].size }, [4096, 4096])
+        XCTAssertEqual(try graph.largestChunks(group.chunks, limit: 1).map { graph.chunks[Int($0)].size }, [8192])
+        XCTAssertTrue(try graph.largestChunks(group.chunks, size: 32, limit: 500).isEmpty)
+        XCTAssertTrue(try graph.largestChunks(group.chunks, size: 0, limit: 500).isEmpty)
+        for index in group.chunks {
+            XCTAssertEqual(try snapshot.chunkGroup(containing: Int(index)), group.id)
+        }
+        let source = Int(group.chunks[0]), target = Int(group.chunks[1])
+        XCTAssertTrue(graph.pointerIsExact(from: source, to: target))
+        XCTAssertFalse(graph.pointerIsExact(from: target, to: source))
+        XCTAssertEqual(graph.details(source).pointers.first, Int32(target))
+        XCTAssertEqual(try graph.attribution(target).kind, .nativeRoot)
+        XCTAssertThrowsError(try graph.attribution(graph.chunks.count))
+        XCTAssertNil(try snapshot.chunkGroup(containing: graph.chunks.count))
+        XCTAssertNil(try snapshot.chunkGroup(containing: -1))
+        XCTAssertNil(try snapshot.chunkGroup(containing: 1 << 32))
+        XCTAssertEqual(try open("native-allocations").chunkGroups.map(\.id), groups.map(\.id))
+        let ownership = try snapshot.ownership
+        XCTAssertEqual(ownership.roots.reduce(0) { $0 + $1.chunks }, 1)
+        XCTAssertEqual(ownership.roots.reduce(0) { $0 + $1.objects }, 1)
+        let root = try XCTUnwrap(ownership.roots.first { $0.chunks > 0 })
+        XCTAssertEqual(root.native, 16384)
+        XCTAssertEqual(Array(ownership.rootReferences(root.node)), [Int32(ownership.chunkNode(0))])
+        XCTAssertEqual(ownership.node(ownership.chunkNode(0)), .chunk(0))
     }
 
     func testRustReleasesSwiftCallbacksOnSuccessAndFailure() throws {

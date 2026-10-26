@@ -2,12 +2,13 @@ use crate::{
     Error, Result,
     bytes::ReadBytes,
     column::{create_directory, persist},
+    progress::Progress,
 };
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use rayon::prelude::*;
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -132,16 +133,29 @@ pub struct CompressedCore {
 
 impl CompressedCore {
     pub fn open(path: &Path, directory: &Path) -> Result<Self> {
+        Self::open_with_progress(path, directory, Progress::none())
+    }
+
+    fn open_with_progress(path: &Path, directory: &Path, progress: Progress<'_>) -> Result<Self> {
+        progress.report(0.0);
         create_directory(directory)?;
         let before = identity(path)?;
         if let Ok(core) = Self::cached(path, directory, &before) {
+            progress.named("Opening cached dump blocks").report(1.0);
             return Ok(core);
         }
         let input = map_file(path)?;
-        let (offsets, starts) = if let Some(index) = index_frames(&input) {
+        let (offsets, starts) = if let Some(index) = index_frames(
+            &input,
+            progress
+                .portion(0.0, 0.05)
+                .named("Indexing compressed blocks"),
+        ) {
             let _ = fs::remove_file(directory.join("core.blocks"));
             index
         } else {
+            let progress = progress.named("Recompressing the dump");
+            progress.report(0.0);
             let mut decoder = zstd::stream::read::Decoder::new(&input[..])
                 .map_err(|e| Error::cache(format!("cannot decompress {}: {e}", path.display())))?;
             let mut blocks = tempfile::NamedTempFile::new_in(directory)?;
@@ -184,6 +198,9 @@ impl CompressedCore {
                     offsets.push(offsets.last().unwrap() + packed.len());
                     starts.push(starts.last().unwrap() + bytes.len());
                 }
+                progress
+                    .portion(0.05, 0.9)
+                    .items(input.len() - decoder.get_ref().get_ref().len(), input.len());
             }
             if starts.len() < 2 {
                 return Err(Error::cache("the compressed dump is empty"));
@@ -198,6 +215,8 @@ impl CompressedCore {
                 "the dump changed while it was being read",
             ));
         }
+        let progress = progress.named("Saving the compressed block index");
+        progress.report(0.9);
         let _ = fs::remove_file(directory.join("core.dump"));
         for (name, values) in [("core.index.col", offsets), ("core.starts.col", starts)] {
             let data: Vec<u8> = values
@@ -207,7 +226,9 @@ impl CompressedCore {
             atomic_write(&directory.join(name), &data)?;
         }
         atomic_write(&directory.join("core.dump"), before.as_bytes())?;
-        Self::cached(path, directory, &before)
+        let core = Self::cached(path, directory, &before)?;
+        progress.report(1.0);
+        Ok(core)
     }
 
     fn cached(path: &Path, directory: &Path, expected: &str) -> Result<Self> {
@@ -326,7 +347,7 @@ impl CompressedCore {
     }
 }
 
-fn index_frames(bytes: &[u8]) -> Option<(Vec<usize>, Vec<usize>)> {
+fn index_frames(bytes: &[u8], progress: Progress<'_>) -> Option<(Vec<usize>, Vec<usize>)> {
     let (mut offsets, mut starts, mut at, mut position) = (Vec::new(), Vec::new(), 0usize, 0usize);
     while at < bytes.len() {
         let rest = &bytes[at..];
@@ -351,6 +372,9 @@ fn index_frames(bytes: &[u8]) -> Option<(Vec<usize>, Vec<usize>)> {
             starts.push(position);
         }
         at += length;
+        if offsets.len() % 256 == 0 {
+            progress.items(at, bytes.len());
+        }
         position = position.checked_add(size)?;
     }
     if starts.is_empty() {
@@ -372,6 +396,14 @@ pub struct Source {
 
 impl Source {
     pub fn open(path: &Path, directory: Option<&Path>) -> Result<Self> {
+        Self::open_with_progress(path, directory, Progress::none())
+    }
+
+    pub(crate) fn open_with_progress(
+        path: &Path,
+        directory: Option<&Path>,
+        progress: Progress<'_>,
+    ) -> Result<Self> {
         let mut prefix = [0; 4];
         let n = File::open(path)
             .map_err(|e| Error::open(path.display(), e))?
@@ -384,10 +416,11 @@ impl Source {
                     Error::cache("a .zst dump needs a cache folder for its compressed blocks")
                 })?;
                 Backing::Compressed(Box::new(LazyMemory::new(
-                    CompressedCore::open(path, directory)?,
+                    CompressedCore::open_with_progress(path, directory, progress)?,
                     directory,
                 )?))
             } else {
+                progress.named("Mapping the dump").report(0.0);
                 Backing::Raw(map_file(path)?)
             },
         })
@@ -425,7 +458,7 @@ impl Source {
                         .map(|b| (offset, std::borrow::Cow::Borrowed(b)));
                 }
                 if let Some(mut buffer) = scratch
-                    && !m.ready[block].load(Ordering::Acquire)
+                    && !m.is_ready(range.start, range.len())
                 {
                     match m.core.decode(block, &mut buffer) {
                         Ok(()) => Some((range.start, std::borrow::Cow::Owned(buffer))),
@@ -451,7 +484,6 @@ impl Source {
             Backing::Compressed(m) => m.bytes(offset, count),
         }
     }
-
     pub fn check(&self) -> Result<()> {
         if let Backing::Compressed(m) = &self.backing
             && let Some(e) = m.error.lock().unwrap().as_ref()
@@ -478,7 +510,7 @@ impl Source {
                     let block = m.core.block(at);
                     let range = m.core.range(block);
                     let stop = range.end.min(end);
-                    if m.ready[block].load(Ordering::Acquire) {
+                    if m.is_ready(range.start, range.len()) {
                         body(at, m.bytes(at, stop - at).unwrap());
                     } else {
                         match m.core.decode(block, &mut buffer) {
@@ -502,10 +534,11 @@ struct LazyMemory {
     pointer: *mut u8,
     ready: Vec<AtomicBool>,
     locks: [Mutex<()>; 64],
+    readers: Vec<Mutex<(Option<usize>, Vec<u8>)>>,
     error: Mutex<Option<Error>>,
 }
 
-// Each block is written once under its lock. Readers get references only after
+// Each page is written once under its lock. Readers get references only after
 // publication with Release/Acquire, and no code can change published bytes.
 unsafe impl Send for LazyMemory {}
 unsafe impl Sync for LazyMemory {}
@@ -517,8 +550,17 @@ impl LazyMemory {
         // The unlinked file and its mapping are owned exclusively by this object.
         let mut map = unsafe { MmapOptions::new().map_mut(&file)? };
         let pointer = map.as_mut_ptr();
-        let ready = (1..core.starts.len())
+        let ready = (0..core.len().div_ceil(4096))
             .map(|_| AtomicBool::new(false))
+            .collect();
+        let largest = core
+            .starts
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .max()
+            .unwrap_or(1);
+        let readers = (0..((64 << 20) / largest).clamp(1, 256))
+            .map(|_| Mutex::new((None, Vec::new())))
             .collect();
         Ok(Self {
             core,
@@ -526,6 +568,7 @@ impl LazyMemory {
             pointer,
             ready,
             locks: std::array::from_fn(|_| Mutex::new(())),
+            readers,
             error: Mutex::new(None),
         })
     }
@@ -538,39 +581,62 @@ impl LazyMemory {
         }
     }
 
-    fn bytes(&self, offset: usize, count: usize) -> Option<&[u8]> {
-        if count > 0 {
-            let last = self.core.block(offset + count - 1);
-            let mut buffer = Vec::new();
-            for block in self.core.block(offset)..=last {
-                if self.ready[block].load(Ordering::Acquire) {
-                    continue;
-                }
-                let _lock = self.locks[block % self.locks.len()].lock().unwrap();
-                if self.ready[block].load(Ordering::Acquire) {
-                    continue;
-                }
-                if let Err(e) = self.core.decode(block, &mut buffer) {
-                    self.fail(e);
+    fn read_into(&self, mut offset: usize, mut output: &mut [u8]) -> Option<()> {
+        while !output.is_empty() {
+            let block = self.core.block(offset);
+            let range = self.core.range(block);
+            let count = output.len().min(range.end - offset);
+            let mut reader = self.readers[block % self.readers.len()].lock().unwrap();
+            if reader.0 != Some(block) {
+                reader.0 = None;
+                if let Err(error) = self.core.decode(block, &mut reader.1) {
+                    self.fail(error);
                     return None;
                 }
-                let start = self.core.starts[block];
-                for (i, page) in buffer.chunks(4096).enumerate() {
-                    if page.iter().any(|&b| b != 0) {
-                        // This block has no readers until the ready flag is published.
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                page.as_ptr(),
-                                self.pointer.add(start + i * 4096),
-                                page.len(),
-                            );
-                        }
+                reader.0 = Some(block);
+            }
+            let start = offset - range.start;
+            output[..count].copy_from_slice(&reader.1[start..start + count]);
+            offset += count;
+            output = &mut output[count..];
+        }
+        Some(())
+    }
+
+    fn is_ready(&self, offset: usize, count: usize) -> bool {
+        count == 0
+            || (offset / 4096..=(offset + count - 1) / 4096)
+                .all(|page| self.ready[page].load(Ordering::Acquire))
+    }
+
+    fn bytes(&self, offset: usize, count: usize) -> Option<&[u8]> {
+        if count > 0 {
+            let mut buffer = [0; 4096];
+            for page in offset / 4096..=(offset + count - 1) / 4096 {
+                if self.ready[page].load(Ordering::Acquire) {
+                    continue;
+                }
+                let _lock = self.locks[page % self.locks.len()].lock().unwrap();
+                if self.ready[page].load(Ordering::Acquire) {
+                    continue;
+                }
+                let start = page * 4096;
+                let length = buffer.len().min(self.core.len() - start);
+                self.read_into(start, &mut buffer[..length])?;
+                if buffer[..length].iter().any(|&b| b != 0) {
+                    // The page has no readers until its ready flag is published.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            buffer.as_ptr(),
+                            self.pointer.add(start),
+                            length,
+                        );
                     }
                 }
-                self.ready[block].store(true, Ordering::Release);
+                self.ready[page].store(true, Ordering::Release);
             }
         }
-        // Every byte in this range is initialized and immutable for self's lifetime.
+        // Published pages stay immutable for the lifetime of the mapping.
         Some(unsafe { std::slice::from_raw_parts(self.pointer.add(offset), count) })
     }
 }
@@ -605,24 +671,115 @@ pub fn compress_file(
     target: &Path,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<()> {
-    let parent = target
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut output = tempfile::NamedTempFile::new_in(parent)?;
+    if target.try_exists()? {
+        return Err(Error::open(target.display(), "the file already exists"));
+    }
     let workers = (std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
         / 2)
     .clamp(1, 8);
+    let output = compress_reader(&mut input, target, 1, workers, false, |_, done, written| {
+        progress(done, written);
+        Ok(())
+    })?;
+    output
+        .persist_noclobber(target)
+        .map_err(|e| Error::open(target.display(), e.error))?;
+    Ok(())
+}
+
+pub fn needs_conversion(path: &Path) -> Result<bool> {
+    let input = map_file(path)?;
+    Ok(input.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+        && index_frames(&input, Progress::none()).is_none())
+}
+
+pub fn convert(
+    source: &Path,
+    target: Option<&Path>,
+    mut progress: impl FnMut(f64) -> bool,
+) -> Result<()> {
+    let source = source.canonicalize()?;
+    let before = identity(&source)?;
+    let destination = target.unwrap_or(&source);
+    if target.is_some() && destination.try_exists()? {
+        return Err(Error::open(
+            destination.display(),
+            "the file already exists",
+        ));
+    }
+    if !progress(0.0) {
+        return Err(Error("Conversion cancelled".into()));
+    }
+    let input = map_file(&source)?;
+    let mut decoder = zstd::stream::read::Decoder::with_buffer(&input[..])?;
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let output = compress_reader(
+        &mut decoder,
+        destination,
+        3,
+        workers,
+        true,
+        |decoder, _, _| {
+            if progress((1.0 - decoder.get_ref().len() as f64 / input.len() as f64) * 0.99) {
+                Ok(())
+            } else {
+                Err(Error("Conversion cancelled".into()))
+            }
+        },
+    )?;
+    if target.is_none() {
+        output
+            .as_file()
+            .set_permissions(fs::metadata(&source)?.permissions())?;
+    }
+    output.as_file().sync_all()?;
+    drop(decoder);
+    drop(input);
+    if !progress(0.99) {
+        return Err(Error("Conversion cancelled".into()));
+    }
+    if identity(&source)? != before {
+        return Err(Error::open(
+            source.display(),
+            "the dump changed during conversion",
+        ));
+    }
+    if target.is_some() {
+        output
+            .persist_noclobber(destination)
+            .map_err(|e| Error::open(destination.display(), e.error))?;
+    } else {
+        persist(output, destination)?;
+    }
+    progress(1.0);
+    Ok(())
+}
+
+fn compress_reader<R: Read>(
+    input: &mut R,
+    target: &Path,
+    level: i32,
+    workers: usize,
+    verify: bool,
+    mut progress: impl FnMut(&R, u64, u64) -> Result<()>,
+) -> Result<tempfile::NamedTempFile> {
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut output = tempfile::NamedTempFile::new_in(parent)?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(workers)
         .build()
         .map_err(|e| Error::cache(e.to_string()))?;
-    const BATCH: usize = 64;
-    let mut buffer = vec![0; BATCH * BLOCK_SIZE];
-    let compressors = CompressorPool::new(1);
-    let mut packed = vec![Vec::new(); BATCH];
+    let batch = workers.max(64);
+    let mut buffer = vec![0; batch * BLOCK_SIZE];
+    let compressors = CompressorPool::new(level);
+    let mut packed = vec![Vec::new(); batch];
     let (mut frames, mut done, mut written) = (Vec::new(), 0, 0);
     loop {
         let mut count = 0;
@@ -644,18 +801,85 @@ pub fn compress_file(
                 .zip(buffer[..count].par_chunks(BLOCK_SIZE))
                 .try_for_each(|(packed, bytes)| compressors.compress(bytes, packed))
         })?;
+        let start = written;
         for (data, bytes) in packed.iter().zip(buffer[..count].chunks(BLOCK_SIZE)) {
             output.write_all(data)?;
             frames.push((data.len() as u32, bytes.len() as u32));
             written += data.len() as u64;
         }
+        if verify {
+            output.seek(SeekFrom::Start(start))?;
+            verify_frames(&mut output, &mut packed[..blocks], &buffer[..count], &pool)?;
+        }
         done += count as u64;
-        progress(done, written);
+        progress(input, done, written)?;
     }
-    output.write_all(&seek_table(&frames)?)?;
+    let table = seek_table(&frames)?;
+    output.write_all(&table)?;
+    if verify {
+        output.seek(SeekFrom::Start(written))?;
+        let mut saved_table = vec![0; table.len()];
+        output.read_exact(&mut saved_table)?;
+        if saved_table != table {
+            return Err(Error(
+                "The converted dump's seek table failed verification".into(),
+            ));
+        }
+    }
     output.as_file().sync_all()?;
-    output
-        .persist_noclobber(target)
-        .map_err(|e| Error::open(target.display(), e.error))?;
-    Ok(())
+    Ok(output)
+}
+
+fn verify_frames(
+    input: &mut impl Read,
+    packed: &mut [Vec<u8>],
+    original: &[u8],
+    pool: &rayon::ThreadPool,
+) -> Result<()> {
+    for frame in packed.iter_mut() {
+        input.read_exact(frame)?;
+    }
+    pool.install(|| {
+        packed
+            .par_iter()
+            .zip(original.par_chunks(BLOCK_SIZE))
+            .try_for_each(|(frame, bytes)| {
+                let restored = zstd::bulk::decompress(frame, bytes.len())?;
+                if restored != bytes {
+                    return Err(Error(
+                        "The converted dump's contents failed verification".into(),
+                    ));
+                }
+                Ok(())
+            })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_back_verification_rejects_changed_or_truncated_frames() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let original = vec![7; BLOCK_SIZE];
+        let correct = zstd::bulk::compress(&original, 3).unwrap();
+        let changed = zstd::bulk::compress(&vec![9; BLOCK_SIZE], 3).unwrap();
+        let mut packed = vec![vec![0; correct.len()]];
+        verify_frames(&mut correct.as_slice(), &mut packed, &original, &pool).unwrap();
+        let mut packed = vec![vec![0; changed.len()]];
+        assert!(verify_frames(&mut changed.as_slice(), &mut packed, &original, &pool).is_err());
+        assert!(
+            verify_frames(
+                &mut &changed[..changed.len() - 1],
+                &mut packed,
+                &original,
+                &pool
+            )
+            .is_err()
+        );
+    }
 }

@@ -154,9 +154,13 @@ public struct NativeGraph: Sendable {
     public var fastbinChunks: Int { info.fastbinChunks }
     public var cachedBytes: UInt64 { info.cachedBytes }
     public func isRootChunk(_ chunk: Int32) -> Bool { bridge.isRootChunk(chunk: chunk) }
-    public func largestChunks(_ chunks: RustArray<Int32>, limit: Int) throws -> RustArray<Int32> {
-        try bridge.largestChunks(chunks: chunks, limit: limit)
+    public func largestChunks(_ chunks: RustArray<Int32>, size: UInt64? = nil, limit: Int) throws -> RustArray<Int32> {
+        guard size != 0 else { return RustArray() }
+        return try bridge.largestChunks(chunks: chunks, size: size ?? 0, limit: limit)
     }
+    public func chunkSizes(_ chunks: RustArray<Int32>) throws -> RustArray<ChunkSizeGroup> { try bridge.chunkSizes(chunks: chunks) }
+    public func attribution(_ chunk: Int) throws -> ChunkAttribution { try bridge.attribution(chunk: chunk) }
+    public func pointerIsExact(from source: Int, to target: Int) -> Bool { bridge.pointerIsExact(source: source, target: target) }
     public func totals() -> [(reach: Reach, chunks: Int, bytes: UInt64)] { info.totals.map { ($0.reach, $0.chunks, $0.bytes) } }
     public func className(_ chunk: Int) -> String? { bridge.className(chunk: chunk) }
     public func groupLabel(_ chunk: Int, snapshot: HeapSnapshot) throws -> String { try bridge.groupLabel(chunk: chunk) }
@@ -192,6 +196,10 @@ public struct OwnershipGraph: Sendable {
     }
 
     public var rootNode: Int { 0 }
+    public var roots: RustArray<OwnershipRoot> { bridge.roots() }
+    public func rootReferences(_ node: Int) -> RustArray<Int32> { bridge.rootReferences(node: node) }
+    public func objectNode(_ object: Int) -> Int { info.objectBase + object }
+    public func chunkNode(_ chunk: Int) -> Int { info.chunkBase + chunk }
     public func node(_ index: Int) -> Node {
         precondition(index >= 0 && index < info.count, "Ownership node is out of range")
         if index == rootNode { return .root }

@@ -2,6 +2,15 @@ import AppKit
 import HeapCore
 import Observation
 
+private final class DumpCopyDestination: NSObject, NSOpenSavePanelDelegate {
+    func panel(_ sender: Any, validate url: URL) throws {
+        if FileManager.default.fileExists(atPath: url.path) {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError,
+                          userInfo: [NSLocalizedDescriptionKey: "Choose a new filename for the converted copy."])
+        }
+    }
+}
+
 enum Section: String, CaseIterable, Identifiable {
     case summary = "Summary"
     case findings = "Findings"
@@ -92,9 +101,20 @@ final class Session {
     @ObservationIgnored private var navigating = false
     var selectedRegion: Int?
     var heapView: HeapView = .statistics
-    /// The malloc chunk group and chunk open on the Native Memory page.
+    /// The malloc chunk group selected on the Native Memory page.
     var selectedChunkGroup: String?
-    var selectedChunk: Int32?
+    enum InspectedObject: Equatable {
+        case object(Int), chunk(Int)
+    }
+    var inspectedObject: InspectedObject?
+    var selectedChunk: Int32? {
+        get { if case let .chunk(index) = inspectedObject { Int32(index) } else { nil } }
+        set {
+            if let newValue { inspectedObject = .chunk(Int(newValue)) }
+            else if case .chunk = inspectedObject { inspectedObject = nil }
+        }
+    }
+    var nativeMode: NativeMemoryView.Mode = .overview
     var showSearch = false
     var searchQuery = ""
     /// The entry open on the Findings page: a check name or a heap use list.
@@ -117,7 +137,13 @@ final class Session {
     var networkMode = NetworkView.Mode.connections
     var networkGroup: String?
     var filesMode = FilesView.Mode.open
-    var selectedObject: Int?
+    var selectedObject: Int? {
+        get { if case let .object(index) = inspectedObject { index } else { nil } }
+        set {
+            if let newValue { inspectedObject = .object(newValue) }
+            else if case .object = inspectedObject { inspectedObject = nil }
+        }
+    }
     var showInspector = false
     /// The Summary page's view and the ids of the blocks open in its map.
     var summaryMode: SummaryMode = SummaryMode(rawValue: UserDefaults.standard.string(forKey: "summaryMode") ?? "") ?? .kind {
@@ -128,30 +154,30 @@ final class Session {
     /// Where the window is: the page and what is open or selected on it. Back and Forward move between places.
     struct Place: Equatable {
         var section: Section, heapView: HeapView, finding: String, selectedRegion: Int?, selectedType: UInt32?
-        var selectedChunkGroup: String?, selectedChunk: Int32?, taskGroup: Int?, taskGraph: Int?, taskNode: [Int]?
+        var selectedChunkGroup: String?, taskGroup: Int?, taskGraph: Int?, taskNode: [Int]?
         var threadsMode: ThreadsView.Mode, threadStack: String?, timerGroup: String?, timer: Int?, networkMode: NetworkView.Mode, networkGroup: String?
-        var filesMode: FilesView.Mode, selectedObject: Int?, summaryMode: SummaryMode, summaryPath: [String]
+        var filesMode: FilesView.Mode, inspectedObject: InspectedObject?, nativeMode: NativeMemoryView.Mode, summaryMode: SummaryMode, summaryPath: [String]
     }
 
     var place: Place {
         get {
             Place(section: section, heapView: heapView, finding: finding, selectedRegion: selectedRegion, selectedType: selectedType,
-                  selectedChunkGroup: selectedChunkGroup, selectedChunk: selectedChunk, taskGroup: taskGroup, taskGraph: taskGraph, taskNode: taskNode,
+                  selectedChunkGroup: selectedChunkGroup, taskGroup: taskGroup, taskGraph: taskGraph, taskNode: taskNode,
                   threadsMode: threadsMode, threadStack: threadStack, timerGroup: timerGroup, timer: timer, networkMode: networkMode, networkGroup: networkGroup,
-                  filesMode: filesMode, selectedObject: selectedObject, summaryMode: summaryMode, summaryPath: summaryPath)
+                  filesMode: filesMode, inspectedObject: inspectedObject, nativeMode: nativeMode, summaryMode: summaryMode, summaryPath: summaryPath)
         }
         set {
             navigating = true
             section = newValue.section
             navigating = false
             heapView = newValue.heapView; finding = newValue.finding; selectedRegion = newValue.selectedRegion; selectedType = newValue.selectedType
-            selectedChunkGroup = newValue.selectedChunkGroup; selectedChunk = newValue.selectedChunk
+            selectedChunkGroup = newValue.selectedChunkGroup
             taskGroup = newValue.taskGroup; taskGraph = newValue.taskGraph; taskNode = newValue.taskNode
             threadsMode = newValue.threadsMode; threadStack = newValue.threadStack; timerGroup = newValue.timerGroup; timer = newValue.timer
             networkMode = newValue.networkMode; networkGroup = newValue.networkGroup; filesMode = newValue.filesMode
-            selectedObject = newValue.selectedObject
+            inspectedObject = newValue.inspectedObject; nativeMode = newValue.nativeMode
             summaryMode = newValue.summaryMode; summaryPath = newValue.summaryPath
-            if selectedObject != nil { showInspector = true }
+            showInspector = inspectedObject != nil
         }
     }
 
@@ -161,25 +187,96 @@ final class Session {
     @ObservationIgnored private var recorded: Place?
 
     var fromCache = false
+    var converting = false
+    @ObservationIgnored private var openTask: Task<Void, Never>?
+
+    func cancelConversion() { openTask?.cancel() }
+
+    private enum ConversionChoice { case original, convert(String?), cancel }
+
+    private func conversionChoice(_ path: String) -> ConversionChoice {
+        let alert = NSAlert()
+        alert.messageText = "Convert this dump for faster access?"
+        alert.informativeText = "This dump must be decompressed sequentially. Conversion lets Dotheap read compressed blocks directly and avoid a second compressed copy in its cache. Replacing the original needs temporary space and keeps the original intact until conversion is verified."
+        alert.addButton(withTitle: "Replace Original")
+        alert.addButton(withTitle: "Keep Original…")
+        alert.addButton(withTitle: "Open Original")
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        let response = alert.runModal()
+        alert.window.orderOut(nil)
+        if alert.suppressionButton?.state == .on {
+            UserDefaults.standard.set(false, forKey: "suggestDumpConversion")
+        }
+        if response == .alertFirstButtonReturn { return .convert(nil) }
+        guard response == .alertSecondButtonReturn else {
+            return response == .alertThirdButtonReturn ? .original : .cancel
+        }
+        let panel = NSSavePanel()
+        let validation = DumpCopyDestination()
+        panel.delegate = validation
+        panel.title = "Save converted dump"
+        panel.prompt = "Convert"
+        let source = URL(fileURLWithPath: path)
+        var name = source.deletingPathExtension().lastPathComponent
+        if name.hasSuffix(".dmp") { name.removeLast(4) }
+        panel.nameFieldStringValue = name + "-seekable.dmp.zst"
+        panel.directoryURL = source.deletingLastPathComponent()
+        guard withExtendedLifetime(validation, { panel.runModal() }) == .OK,
+              let destination = panel.url else { return .cancel }
+        return .convert(destination.path)
+    }
 
     func open(dump: String, smaps: String?, dlls: String?, rebuild: Bool = false) {
         dumpPath = dump; smapsPath = smaps; dllFolder = dlls
-        snapshot = nil; error = nil; loading = true; phase = "Reading the dump"; fraction = 0
+        snapshot = nil; error = nil; loading = true; phase = "Opening the dump"; fraction = 0
         reports = nil; integrityReport = nil; summaryFindings = nil
         selectedRegion = nil; selectedType = nil; selectedObject = nil; summaryPath = []; backStack = []; forwardStack = []; recorded = nil
         taskGroup = nil; taskGraph = nil; taskNode = nil; threadStack = nil; timerGroup = nil; timer = nil; networkGroup = nil
-        selectedChunkGroup = nil; selectedChunk = nil
+        selectedChunkGroup = nil; inspectedObject = nil; showInspector = false
         symbolDownload?.cancel(); symbolDownload = nil
         let options = AnalysisOptions(nativeMemoryRoots: UserDefaults.standard.object(forKey: "nativeMemoryRoots") as? Bool ?? false)
         self.options = options
-        let started = Date()
-        Task.detached(priority: .userInitiated) {
+        let suggestConversion = UserDefaults.standard.object(forKey: "suggestDumpConversion") as? Bool ?? true
+        openTask = Task.detached(priority: .userInitiated) {
             do {
+                var dump = dump
+                var smaps = smaps
+                var conversionWarnings: [String] = []
+                if suggestConversion, !rebuild, try DumpConversion.needed(dump) {
+                    switch await self.conversionChoice(dump) {
+                    case .cancel:
+                        await MainActor.run { self.loading = false }
+                        return
+                    case .original: break
+                    case .convert(let target):
+                        let destination = target ?? dump
+                        await MainActor.run { self.converting = true; self.phase = "Converting and verifying the dump" }
+                        conversionWarnings = try DumpConversion.convert(dump, to: target, progress: { phase, fraction in
+                            Task { @MainActor in
+                                guard self.converting else { return }
+                                self.phase = phase; self.fraction = fraction
+                            }
+                        }, cancelled: { Task.isCancelled })
+                        smaps = smaps ?? DumpConversion.smaps(nextTo: destination)
+                        dump = destination
+                        let convertedSmaps = smaps
+                        await MainActor.run {
+                            self.converting = false; self.fraction = 0
+                            self.dumpPath = destination; self.smapsPath = convertedSmaps
+                        }
+                    }
+                }
+                let started = Date()
+                let openedDump = dump
                 let s = try HeapSnapshot(path: dump, dllFolders: dlls.map { [$0] } ?? [], smapsPath: smaps, options: options,
                                          cache: rebuild ? .rebuild : .automatic) { phase, fraction in
-                    Task { @MainActor in self.phase = phase; self.fraction = fraction }
+                    Task { @MainActor in
+                        guard self.loading, fraction >= self.fraction else { return }
+                        self.phase = phase; self.fraction = fraction
+                    }
                 }
-                let warnings = s.memo("versions") { s.versions }.warnings + (s.residency?.warning.map { [$0] } ?? [])
+                let warnings = s.memo("versions") { s.versions }.warnings + (s.residency?.warning.map { [$0] } ?? []) + conversionWarnings
                 await MainActor.run {
                     self.snapshot = s
                     self.versionWarnings = warnings
@@ -189,17 +286,22 @@ final class Session {
                     self.applyStartSelection(s)
                     self.startHistory()
                     // The Dock menu's recent files; Open Recent reads the cache folders.
-                    NSDocumentController.shared.noteNewRecentDocumentURL(URL(fileURLWithPath: LiveProcess.absolute(dump)))
+                    NSDocumentController.shared.noteNewRecentDocumentURL(URL(fileURLWithPath: LiveProcess.absolute(openedDump)))
                     self.cacheChanges += 1
                 }
-                // The checks run after the download, so that they run once and name the native frames.
+                async let checks: Void = self.runChecks(s)
                 var shown = s
                 if s.dump.platform.isLinux, UserDefaults.standard.object(forKey: "downloadRuntimeSymbols") as? Bool ?? true {
                     shown = await self.updateSymbols(s, automatic: true)
                 }
-                await self.runChecks(shown)
+                await checks
+                if shown !== s { await self.runChecks(shown) }
             } catch {
-                await MainActor.run { self.error = analysisErrorMessage(error); self.loading = false }
+                let cancelled = Task.isCancelled
+                await MainActor.run {
+                    self.error = cancelled ? nil : analysisErrorMessage(error)
+                    self.loading = false; self.converting = false
+                }
             }
         }
     }
@@ -305,23 +407,23 @@ final class Session {
         case let .finding(see): show(see: see)
         case let .check(name): show(finding: name)
         case let .type(t): section = .types; selectedType = t
-        case let .nativeGroup(id): section = .native; selectedChunkGroup = id; selectedChunk = nil
+        case let .nativeGroup(id): section = .native; nativeMode = .allocations; selectedChunkGroup = id
         case let .object(i): select(object: i)
         case let .region(r): show(region: r)
-        case let .chunk(c):
-            Task {
-                do {
-                    let group = try await Task.detached {
-                        let g = try s.nativeGraph
-                        return "\(g.reach[c].rawValue)/\(try g.groupLabel(c, snapshot: s))"
-                    }.value
-                    guard snapshot === s else { return }
-                    section = .native
-                    selectedChunkGroup = group
-                    selectedChunk = Int32(c)
-                } catch {
-                    if snapshot === s { self.error = analysisErrorMessage(error) }
-                }
+        case let .chunk(c): select(chunk: c)
+        }
+    }
+
+    func showNativeGroup(containing chunk: Int, in snapshot: HeapSnapshot) {
+        Task {
+            do {
+                let group = try await Task.detached { try snapshot.chunkGroup(containing: chunk) }.value
+                guard self.snapshot === snapshot, let group else { return }
+                section = .native
+                nativeMode = .allocations
+                selectedChunkGroup = group
+            } catch {
+                if self.snapshot === snapshot { self.error = analysisErrorMessage(error) }
             }
         }
     }
@@ -378,8 +480,13 @@ final class Session {
         }
     }
 
+    func select(chunk: Int) {
+        inspectedObject = .chunk(chunk)
+        showInspector = true
+    }
+
     func select(object i: Int) {
-        selectedObject = i
+        inspectedObject = .object(i)
         showInspector = true
     }
 

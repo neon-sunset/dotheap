@@ -52,6 +52,26 @@ def gc_storage(path, layout, kind):
     path.write_bytes(data)
 
 
+def native_allocations(path):
+    contract.core(path, refs={8: 1}, rooted=True)
+    data = bytearray(path.read_bytes())
+    sizes = [4096, 8192, 4096, 8192]
+    base, at = 0x700004000000, 48
+    memory = bytearray(32768)
+    struct.pack_into("<QQQQ", memory, 0, 0x710000000000, 0, len(memory), len(memory))
+    struct.pack_into("<H", data, 56, 4)
+    data[232:288] = contract.segment(1, len(data), base, len(memory))
+    struct.pack_into("<Q", data, 4096 + 0x900, base + at + 16)
+    for i, size in enumerate(sizes):
+        struct.pack_into("<Q", memory, at + 8, size | 5)
+        if i < 2:
+            struct.pack_into("<Q", memory, at + 16, base + at + size + 16)
+        at += size
+    struct.pack_into("<Q", memory, at + 8, (len(memory) - at) | 1)
+    data.extend(memory)
+    path.write_bytes(data)
+
+
 def generate(folder):
     folder.mkdir(parents=True, exist_ok=True)
     cases = []
@@ -124,6 +144,7 @@ def generate(folder):
     contract.core(folder / "native-pointer-array.dmp", base=24, component=40, length=2, series=(), rooted=True)
     contract.core(folder / "native-pointer-elements.dmp", base=24, component=8, length=2, series=(), rooted=True)
     contract.core(folder / "native-pointer-multidimensional.dmp", base=40, component=8, length=2, series=(), rooted=True)
+    native_allocations(folder / "native-allocations.dmp")
 
     for architecture in (62, 183):
         for mode in ("workstation-regions", "workstation-segments", "server-regions"):

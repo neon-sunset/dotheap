@@ -26,6 +26,17 @@ public enum LiveProcess {
     }
 }
 
+public enum DumpConversion {
+    public static func needed(_ path: String) throws -> Bool { try RustHeapCore.dumpNeedsConversion(path: path) }
+    public static func convert(_ source: String, to target: String?,
+                               progress: @escaping (String, Double) -> Void,
+                               cancelled: @escaping () -> Bool) throws -> [String] {
+        Array(try RustHeapCore.convertDump(source: source, target: target,
+            progress: ProgressHandler(update: progress, cancelled: cancelled)))
+    }
+    public static func smaps(nextTo path: String) -> String? { RustHeapCore.smapsNextToDump(path: path) }
+}
+
 public enum TypeNames {
     public static func short(_ name: String) -> String { RustHeapCore.shortTypeName(name: name) }
     public static func withoutNamespaces(_ name: String) -> String { RustHeapCore.withoutNamespaces(name: name) }

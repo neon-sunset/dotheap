@@ -155,7 +155,7 @@ private struct TimerDetail: View {
                     }
                     GridRow {
                         Text("Held by").foregroundStyle(.secondary)
-                        HStack(spacing: 8) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(t.ownerText).textSelection(.enabled)
                             if let o = t.owner { ObjectLink(snapshot: snapshot, object: o, showSize: false) }
                         }
@@ -166,7 +166,7 @@ private struct TimerDetail: View {
                 }
                 RootPath(snapshot: snapshot, object: t.owner ?? t.source ?? t.object, avoiding: HeapSnapshot.timerQueueTypes, avoidingText: "the timer queues")
             }
-            .padding(10)
+            .padding(PageInsets.detail)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

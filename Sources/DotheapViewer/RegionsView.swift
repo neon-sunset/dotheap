@@ -56,10 +56,13 @@ struct RegionsView: View {
             .init("Objects", width: 80, font: .digits, value: \.objects, text: { $0.objects.formatted() }),
         ]
         SplitPanes(axis: .vertical, firstMin: 200, secondMin: 260, initial: 0.45, showSecond: session.selectedRegion != nil) {
-            VStack(alignment: .leading, spacing: 8) {
-                TextField(satori ? "Filter by queue, generation or address" : "Filter by list, generation or address", text: $filter)
-                    .textFieldStyle(.roundedBorder).frame(maxWidth: 320).padding([.horizontal, .top], 10)
+            VStack(alignment: .leading, spacing: 0) {
+                PageToolbar {
+                    TextField(satori ? "Filter by queue, generation or address" : "Filter by list, generation or address", text: $filter)
+                        .textFieldStyle(.roundedBorder).frame(maxWidth: 320)
+                }
                 TextTable(rows: rows, columns: columns, sort: $sort, selection: session.selectedRegion, select: { session.selectedRegion = $0 })
+                    .padding(PageInsets.content)
             }
         } second: {
             if let r = session.selectedRegion {
@@ -104,7 +107,7 @@ struct RegionDetailView: View {
     @Environment(Session.self) private var session
     let snapshot: HeapSnapshot
     let regionIndex: Int
-    @State private var objectSort: TableSort? = TableSort(column: "Size", ascending: false)
+    @State private var objectSort: TableSort? = TableSort(column: "Address", ascending: true)
 
     struct ObjectRow: Identifiable {
         let id: Int
@@ -178,7 +181,7 @@ struct RegionDetailView: View {
                     }
                     .id(regionIndex)
                 }
-                .padding(12)
+                .padding(PageInsets.detail)
             }
         } second: {
             Computed(snapshot, key: "region rows \(regionIndex)", label: "Reading the objects", compute: { s in

@@ -159,6 +159,7 @@ pub fn report(s: &HeapSnapshot, arguments: &Arguments) -> Result<String> {
                     record([
                         ("bytes", bytes(g.bytes)),
                         ("chunks", int(g.chunks.len())),
+                        ("identifiedBy", text(g.kind.title())),
                         ("label", text(&g.label)),
                     ])
                 }),

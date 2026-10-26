@@ -1,7 +1,7 @@
 use heap_core::{
     analysis::HeapSnapshot, cache::CacheChoice, compressed::atomic_write, graph::AnalysisOptions,
 };
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command, sync::Mutex};
 
 #[test]
 fn invalid_heap_and_graph_caches_are_rebuilt_from_the_dump() {
@@ -20,15 +20,51 @@ fn invalid_heap_and_graph_caches_are_rebuilt_from_the_dump() {
     let path = fixtures.join("reference-rooted.dmp");
     let cache = directory.path().join("cache");
     let open = || {
-        HeapSnapshot::open(
+        let progress = Mutex::new(Vec::new());
+        let snapshot = HeapSnapshot::open(
             &path,
             Vec::new(),
             None,
             AnalysisOptions::default(),
             CacheChoice::Folder(cache.clone()),
-            |_, _| {},
+            |phase, fraction| progress.lock().unwrap().push((phase.to_owned(), fraction)),
         )
-        .unwrap()
+        .unwrap();
+        let progress = progress.into_inner().unwrap();
+        assert_eq!(progress.first().unwrap().1, 0.0);
+        assert_eq!(progress.last().unwrap(), &("Done".into(), 1.0));
+        assert!(
+            progress
+                .iter()
+                .all(|(_, fraction)| fraction.is_finite() && (0.0..=1.0).contains(fraction))
+        );
+        assert!(
+            progress.windows(2).all(|pair| pair[0].1 <= pair[1].1),
+            "{progress:?}"
+        );
+        let expected = if snapshot.from_cache {
+            &[
+                "Opening cached objects",
+                "Opening cached references",
+                "Resolving type names",
+            ][..]
+        } else {
+            &[
+                "Walking the heap",
+                "References and roots",
+                "Native memory",
+                "Types",
+            ][..]
+        };
+        for phase in expected {
+            assert!(
+                progress
+                    .iter()
+                    .any(|(name, fraction)| name == phase && *fraction < 1.0),
+                "{progress:?}"
+            );
+        }
+        snapshot
     };
     let original = open();
     assert!(!original.from_cache);

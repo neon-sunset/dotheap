@@ -56,9 +56,9 @@ impl HeapSnapshot {
         let mut results = Vec::new();
         let server = server.trim_end_matches('/');
         let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(if automatic { 20 } else { 600 })))
+            .timeout_global(Some(Duration::from_secs(600)))
             .timeout_connect(Some(Duration::from_secs(20)))
-            .timeout_recv_body(Some(Duration::from_secs(20)))
+            .timeout_recv_response(Some(Duration::from_secs(20)))
             .build()
             .new_agent();
         for file in self.dump.files.iter().filter(|f| f.file_offset == 0) {

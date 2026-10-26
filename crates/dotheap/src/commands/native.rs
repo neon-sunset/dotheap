@@ -11,6 +11,7 @@ pub fn native(c: &Context<'_>) -> Result<Value> {
     c.require_malloc()?;
     let s = c.snapshot;
     let g = s.native_graph()?;
+    let all_groups = s.chunk_groups()?;
     let reach = c
         .arguments
         .value("--reach")
@@ -25,8 +26,7 @@ pub fn native(c: &Context<'_>) -> Result<Value> {
             ))),
         })
         .transpose()?;
-    let groups = s.chunk_groups()?;
-    let groups = groups.iter().filter(|group| {
+    let groups = all_groups.iter().filter(|group| {
         reach.is_none_or(|r| group.reach == r)
             && c.arguments
                 .value("--match")
@@ -35,15 +35,82 @@ pub fn native(c: &Context<'_>) -> Result<Value> {
                 .value("--library")
                 .is_none_or(|q| group.library.as_deref().is_some_and(|l| contains(l, q)))
     });
+    if let Some(id) = c.arguments.value("--group") {
+        let group = groups.clone().find(|group| group.id == id).ok_or_else(|| {
+            Error(format!(
+                "Unknown native group {id}; use native to list group IDs"
+            ))
+        })?;
+        let size = c
+            .arguments
+            .value("--size")
+            .map(|size| {
+                size.parse::<u64>()
+                    .map_err(|_| Error("--size needs a chunk size in bytes".into()))
+            })
+            .transpose()?;
+        let sizes = g.chunk_sizes(&group.chunks)?;
+        let count = size.map_or(group.chunks.len(), |size| {
+            sizes
+                .iter()
+                .find(|group| group.size == size)
+                .map_or(0, |group| group.count)
+        });
+        let selected = g.largest_chunks(&group.chunks, size, c.limit())?;
+        let rows: Vec<_> = selected
+            .iter()
+            .map(|&index| {
+                let chunk = &g.chunks[index as usize];
+                record([
+                    ("address", address(chunk.user_start())),
+                    ("size", bytes(chunk.size)),
+                ])
+            })
+            .collect();
+        let omitted = count - rows.len();
+        return Ok(record([
+            ("group", text(&group.id)),
+            ("label", text(&group.label)),
+            ("identifiedBy", text(group.kind.title())),
+            ("heldBy", text(group.reach.holder())),
+            ("library", optional(group.library.as_deref())),
+            ("bytes", bytes(group.bytes)),
+            ("chunks", int(group.chunks.len())),
+            (
+                "sizes",
+                limited(&sizes, c.limit(), |size| {
+                    record([
+                        ("size", bytes(size.size)),
+                        ("chunks", int(size.count)),
+                        ("bytes", bytes(size.bytes)),
+                    ])
+                }),
+            ),
+            ("selectedSize", size.map(bytes).unwrap_or(Value::Null)),
+            ("matchingChunks", int(count)),
+            ("allocations", Value::List(rows, omitted)),
+            (
+                "note",
+                text(
+                    "Sizes include malloc headers and padding. Allocations are listed by size, largest first. Use chunk <core> <address> to inspect references. Native pointer matches do not establish ownership or the allocation site.",
+                ),
+            ),
+        ]));
+    }
+    if c.arguments.value("--size").is_some() {
+        return Err(Error(
+            "--size requires --group; use native to list group IDs".into(),
+        ));
+    }
     let mut libraries = BTreeMap::<String, (usize, u64)>::new();
-    for (i, ch) in g.chunks.iter().enumerate().filter(|(i, _)| g.is_in_use(*i)) {
-        let library = g.library(i).unwrap_or_else(|| {
+    for group in all_groups.iter() {
+        let library = group.library.clone().unwrap_or_else(|| {
             if [
                 Reach::LiveManaged,
                 Reach::PendingManaged,
                 Reach::DeadManaged,
             ]
-            .contains(&g.reach[i])
+            .contains(&group.reach)
             {
                 "(held by managed objects)".into()
             } else {
@@ -51,8 +118,8 @@ pub fn native(c: &Context<'_>) -> Result<Value> {
             }
         });
         let entry = libraries.entry(library).or_default();
-        entry.0 += 1;
-        entry.1 += ch.size;
+        entry.0 += group.chunks.len();
+        entry.1 += group.bytes;
     }
     let mut owners = BTreeMap::<String, (usize, u64)>::new();
     for (&owner, &bytes) in &g.native_retained {
@@ -170,9 +237,13 @@ pub fn native(c: &Context<'_>) -> Result<Value> {
                     .min_by_key(|&i| (std::cmp::Reverse(g.chunks[i as usize].size), i))
                     .map(|i| g.chunks[i as usize].user_start());
                 record([
+                    ("id", text(&group.id)),
                     ("bytes", bytes(group.bytes)),
                     ("chunks", int(group.chunks.len())),
+                    ("minSize", bytes(group.min_size)),
+                    ("maxSize", bytes(group.max_size)),
                     ("heldBy", text(group.reach.holder())),
+                    ("identifiedBy", text(group.kind.title())),
                     ("library", text(group.library.as_deref().unwrap_or(""))),
                     ("largest", optional_address(largest)),
                     ("label", text(&group.label)),
@@ -214,13 +285,31 @@ pub fn chunk(c: &Context<'_>) -> Result<Value> {
             out.add("label", text(g.group_label(k, s)?));
             out.add("cppClass", optional(g.class_name(k)));
             out.add("library", optional(g.library(k)));
+            let attribution = g.attribution(k, s)?;
+            out.add("attribution", record([
+                ("identifiedBy", text(attribution.kind.title())),
+                ("label", text(attribution.label)),
+                ("library", optional(attribution.library)),
+                ("sourceChunk", optional_address(attribution.source_chunk.map(|i| g.chunks[i].user_start()))),
+                ("sourceObject", optional_address(attribution.source_object.map(|i| s.heap.addresses[i]))),
+                ("note", text("Native pointers are conservative address matches. Attribution does not identify the allocation site or establish ownership.")),
+            ]));
         }
         ChunkState::Free => out.add("state", text("free")),
         ChunkState::Cached => out.add("state", text("freed, in a tcache or fastbin list")),
         ChunkState::Mapping => out.add("state", text("anonymous mapping (not malloc)")),
     }
     if g.root_chunks.contains(&(k as i32)) {
-        out.add("nativeRoot", optional(g.root_source.get(&(k as i32))));
+        out.add(
+            "nativeRoots",
+            list(
+                g.root_sources
+                    .get(&(k as i32))
+                    .into_iter()
+                    .flatten()
+                    .map(text),
+            ),
+        );
     }
     if let Some(owner) = g.owning_object(k) {
         out.add("keptBy", c.row(owner, false));
@@ -240,21 +329,27 @@ pub fn chunk(c: &Context<'_>) -> Result<Value> {
             c.ownership_path(&ownership.path_to_root(node))?,
         );
     }
-    let chunk_row = |&j: &i32| -> Result<Value> {
+    let chunk_row = |&j: &i32, incoming| -> Result<Value> {
         let j = j as usize;
         Ok(record([
             ("address", address(g.chunks[j].user_start())),
             ("size", bytes(g.chunks[j].size)),
             ("label", text(g.group_label(j, s)?)),
+            (
+                "pointerToStart",
+                Value::Bool(
+                    g.pointer_is_exact(if incoming { j } else { k }, if incoming { k } else { j }),
+                ),
+            ),
         ]))
     };
     out.add(
         "pointedToByChunks",
-        try_limited(g.referrers(k), c.limit(), chunk_row)?,
+        try_limited(g.referrers(k), c.limit(), |j| chunk_row(j, true))?,
     );
     out.add(
         "pointsToChunks",
-        try_limited(g.pointers(k), c.limit(), chunk_row)?,
+        try_limited(g.pointers(k), c.limit(), |j| chunk_row(j, false))?,
     );
     if let Some(owners) = g.chunk_owners.get(&(k as i32)) {
         out.add(

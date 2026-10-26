@@ -22,6 +22,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
         let flexible: Bool
         let font: CellFont
         let truncation: NSLineBreakMode
+        let typeNameStyle: TypeNameStyle?
         let text: (Row) -> String
         let color: ((Row) -> NSColor?)?
         let help: ((Row) -> String)?
@@ -38,21 +39,22 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
 
         init<V: Comparable>(_ title: String, width: CGFloat, minWidth: CGFloat = 40, flexible: Bool = false, font: CellFont = .regular,
                             truncation: NSLineBreakMode = .byTruncatingTail, value: @escaping (Row) -> V, text: @escaping (Row) -> String,
-                            color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil) {
+                            color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, typeNameStyle: TypeNameStyle? = nil) {
             self.init(title, width: width, minWidth: minWidth, flexible: flexible, font: font, truncation: truncation, ascending: { value($0) < value($1) },
-                      text: text, color: color, help: help)
+                      text: text, color: color, help: help, typeNameStyle: typeNameStyle)
         }
 
         /// A column that does not sort.
         init(_ title: String, width: CGFloat, minWidth: CGFloat = 40, flexible: Bool = false, font: CellFont = .regular,
              truncation: NSLineBreakMode = .byTruncatingTail, ascending: ((Row, Row) -> Bool)? = nil, text: @escaping (Row) -> String,
-             color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil) {
+             color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, typeNameStyle: TypeNameStyle? = nil) {
             self.title = title
             self.width = width
             self.minWidth = minWidth
             self.flexible = flexible
             self.font = font
             self.truncation = truncation
+            self.typeNameStyle = typeNameStyle
             self.text = text
             self.color = color
             self.help = help
@@ -109,6 +111,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
+        let styleChanged = c.parent.columns.map(\.typeNameStyle) != columns.map(\.typeNameStyle)
         c.parent = self
         if let table = c.table {
             if table.numberOfColumns != columns.count {
@@ -124,6 +127,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
             c.rows = rows
             c.apply(sort)
         }
+        if styleChanged { c.table?.reloadData() }
         c.showSelection()
     }
 
@@ -259,7 +263,11 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
                 return view
             }
             let cell = tableView.makeView(withIdentifier: tableColumn.identifier, owner: nil) as? NSTableCellView ?? makeCell(tableColumn.identifier, column)
-            cell.textField?.stringValue = column.text(r)
+            if let field = cell.textField as? TypeNameField, let style = column.typeNameStyle {
+                field.name = column.text(r)
+                field.style = style
+                field.needsLayout = true
+            } else { cell.textField?.stringValue = column.text(r) }
             cell.textField?.textColor = column.color?(r) ?? .labelColor
             cell.textField?.toolTip = column.help?(r)
             return cell
@@ -268,7 +276,12 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
         private func makeCell(_ identifier: NSUserInterfaceItemIdentifier, _ column: Column) -> NSTableCellView {
             let cell = NSTableCellView()
             cell.identifier = identifier
-            let text = NSTextField(labelWithString: "")
+            let text: NSTextField
+            if column.typeNameStyle != nil {
+                let field = TypeNameField(labelWithString: "")
+                field.singleLine = true
+                text = field
+            } else { text = NSTextField(labelWithString: "") }
             let size = NSFont.systemFontSize
             text.font = switch column.font {
             case .regular: .systemFont(ofSize: size)

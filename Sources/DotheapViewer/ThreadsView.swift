@@ -235,7 +235,7 @@ private struct ThreadDetail: View {
                     }
                 }
             }
-            .padding(12)
+            .padding(PageInsets.detail)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

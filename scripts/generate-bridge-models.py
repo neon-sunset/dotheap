@@ -12,7 +12,7 @@ AnalysisOptions TypeStats RegionStats OccupancyHistogram MemoryPart HeapKind Pag
 MethodTableInfo RootSource GcHandle NativeMemory Category MallocParameters
 Residency SmapsMapping Versions Platform FileMapping Thread TypeGroup HandleGroup
 Word FieldValue StructElement ReferenceElement TextPreview DominatorGroup Granule RegionStrip
-Chunk ChunkGroup ReachTotal OwnershipGroup OwnershipNode CheckReport SummaryFinding TaskGraphs
+Chunk ChunkGroup ChunkAttribution ChunkSizeGroup ReachTotal OwnershipGroup OwnershipRoot OwnershipTypeGroup OwnershipNode CheckReport SummaryFinding TaskGraphs
 ThreadInfo ThreadState ThreadGroup StackNode DuplicateString CollectionCapacity ZeroArrays
 TypeCount Finalizable GarbageGroup Timers Network Files FragmentationReport SearchResult
 SymbolDownload Process CacheEntry QueuedWorkItem AsyncAnalysis HeapVerification

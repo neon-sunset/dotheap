@@ -6,6 +6,7 @@ use crate::{
     gc_desc::GcDesc,
     handles::{self, HandleTables},
     heap::ManagedHeap,
+    progress::Progress,
     runtime::RuntimeInfo,
 };
 use rayon::prelude::*;
@@ -257,9 +258,20 @@ impl HeapGraph {
         runtime: Option<&RuntimeInfo>,
         options: AnalysisOptions,
     ) -> Result<Self> {
+        Self::new_with_progress(heap, runtime, options, Progress::none())
+    }
+
+    pub(crate) fn new_with_progress(
+        heap: &mut ManagedHeap,
+        runtime: Option<&RuntimeInfo>,
+        options: AnalysisOptions,
+        progress: Progress<'_>,
+    ) -> Result<Self> {
+        progress.report(0.0);
         let store = &heap.store;
-        let references = build_references(heap)?;
+        let references = build_references(heap, progress.portion(0.0, 0.35))?;
         heap.dump.check()?;
+        progress.report(0.35);
         let tables = HandleTables::find(&heap.dump, heap.low, heap.high);
         let (mut handles, mut handle_counts, mut dependents) = (
             Vec::new(),
@@ -280,7 +292,7 @@ impl HeapGraph {
             }
         }
         let mut marker = Marker::new(heap, &tables, &references, &dependents)?;
-        marker.mark(runtime, options);
+        marker.mark(runtime, options, progress.portion(0.4, 0.65));
         heap.dump.check()?;
         let source_rows = CompressedRows::from_rows(&marker.root_lists, store, Some("sources"))?;
         marker.slots.sort_unstable_by_key(|s| s.0);
@@ -326,6 +338,9 @@ impl HeapGraph {
             dominator_rows: CompressedRows::empty(store)?,
         };
         for i in 0..heap.count() {
+            if i % 4096 == 0 {
+                progress.portion(0.65, 0.7).items(i, heap.count());
+            }
             if graph.live[i] != 0 {
                 let size = heap.size(i);
                 let r = heap.region_of(i);
@@ -341,20 +356,36 @@ impl HeapGraph {
             }
         }
         graph.build_referrers(heap)?;
+        progress.report(0.75);
         graph.sources_of =
             graph
                 .source_rows
                 .transpose(heap.count(), &heap.store, Some("sourcesOf"))?;
-        let result = dominators(&graph, &heap.store, |v| {
-            if v < heap.count() { heap.size(v) } else { 0 }
-        })?;
+        let result = dominators_with_progress(
+            &graph,
+            &heap.store,
+            |v| {
+                if v < heap.count() { heap.size(v) } else { 0 }
+            },
+            progress.portion(0.8, 1.0),
+        )?;
         graph.idom = result.0;
         graph.retained = result.1;
         graph.dominator_rows = result.2;
+        progress.report(1.0);
         Ok(graph)
     }
 
     pub fn from_saved(heap: &ManagedHeap, saved: GraphSaved) -> Result<Self> {
+        Self::from_saved_with_progress(heap, saved, Progress::none())
+    }
+
+    pub(crate) fn from_saved_with_progress(
+        heap: &ManagedHeap,
+        saved: GraphSaved,
+        progress: Progress<'_>,
+    ) -> Result<Self> {
+        progress.report(0.0);
         let s = &heap.store;
         let graph = Self {
             saved,
@@ -383,7 +414,24 @@ impl HeapGraph {
         let n = heap.count();
         let sources = graph.sources.len();
         let total = graph.idom.len();
-        let objects_valid = |items: &[i32]| items.iter().all(|&i| i >= 0 && (i as usize) < n);
+        let total_items = graph.reference_rows.items.len()
+            + graph.referrer_rows.items.len()
+            + graph.source_rows.items.len()
+            + graph.root_slot_objects.len()
+            + graph.sources_of.items.len()
+            + graph.dominator_rows.items.len()
+            + graph.idom.len();
+        let checked = progress.portion(0.1, 0.6).counter(total_items as u64);
+        let indices_valid = |items: &[i32], minimum: i32, limit: usize| {
+            items.chunks(16384).all(|chunk| {
+                let valid = chunk
+                    .iter()
+                    .all(|&i| i >= minimum && (i < 0 || (i as usize) < limit));
+                checked(chunk.len() as u64);
+                valid
+            })
+        };
+        let objects_valid = |items: &[i32]| indices_valid(items, 0, n);
         if graph.referrer_rows.count() != n
             || graph.sources_of.count() != n
             || graph.source_rows.count() != sources
@@ -394,20 +442,9 @@ impl HeapGraph {
             || !objects_valid(&graph.source_rows.items)
             || !objects_valid(&graph.root_slot_objects)
             || graph.root_slot_objects.windows(2).any(|v| v[0] > v[1])
-            || graph
-                .sources_of
-                .items
-                .iter()
-                .any(|&i| i < 0 || i as usize >= sources)
-            || graph
-                .dominator_rows
-                .items
-                .iter()
-                .any(|&i| i < 0 || i as usize >= total)
-            || graph
-                .idom
-                .iter()
-                .any(|&i| i < -1 || i >= 0 && i as usize >= total)
+            || !indices_valid(&graph.sources_of.items, 0, sources)
+            || !indices_valid(&graph.dominator_rows.items, 0, total)
+            || !indices_valid(&graph.idom, -1, total)
             || graph.parent.iter().any(|&i| {
                 i != i32::MIN
                     && if i < 0 {
@@ -429,11 +466,12 @@ impl HeapGraph {
                 .dependents
                 .iter()
                 .any(|(&i, targets)| i < 0 || i as usize >= n || !objects_valid(targets))
-            || !valid_parent_forest(&graph.idom, None)
-            || !valid_parent_forest(&graph.parent, None)
+            || !valid_parent_forest_with_progress(&graph.idom, None, progress.portion(0.6, 0.8))
+            || !valid_parent_forest_with_progress(&graph.parent, None, progress.portion(0.8, 1.0))
         {
             return Err(Error::cache("invalid reference graph"));
         }
+        progress.report(1.0);
         Ok(graph)
     }
 
@@ -498,8 +536,19 @@ impl HeapGraph {
 }
 
 pub(crate) fn valid_parent_forest(parents: &[i32], self_root: Option<usize>) -> bool {
+    valid_parent_forest_with_progress(parents, self_root, Progress::none())
+}
+
+fn valid_parent_forest_with_progress(
+    parents: &[i32],
+    self_root: Option<usize>,
+    progress: Progress<'_>,
+) -> bool {
     let mut state = vec![0u8; parents.len()];
     for start in 0..parents.len() {
+        if start % 4096 == 0 {
+            progress.items(start, parents.len());
+        }
         if state[start] != 0 {
             continue;
         }
@@ -534,7 +583,7 @@ pub(crate) fn valid_parent_forest(parents: &[i32], self_root: Option<usize>) -> 
     true
 }
 
-fn build_references(heap: &ManagedHeap) -> Result<CompressedRows> {
+fn build_references(heap: &ManagedHeap, progress: Progress<'_>) -> Result<CompressedRows> {
     let descriptors: Vec<_> = heap
         .types
         .iter()
@@ -543,6 +592,7 @@ fn build_references(heap: &ManagedHeap) -> Result<CompressedRows> {
     let mut start: Column<u64> = heap
         .store
         .make(heap.count() + 1, Some("references.start"))?;
+    let counted = progress.portion(0.0, 0.5).counter(heap.count() as u64);
     start[1..]
         .par_chunks_mut(2048)
         .enumerate()
@@ -552,6 +602,7 @@ fn build_references(heap: &ManagedHeap) -> Result<CompressedRows> {
                 let i = chunk * 2048 + j;
                 descriptors[heap.type_ids[i] as usize].scan(heap, i, &mut cursor, |_| *count += 1);
             }
+            counted(counts.len() as u64);
         });
     heap.dump.check()?;
     for i in 0..heap.count() {
@@ -568,6 +619,7 @@ fn build_references(heap: &ManagedHeap) -> Result<CompressedRows> {
         remaining = rest;
         parts.push((begin, end, part));
     }
+    let copied = progress.portion(0.5, 1.0).counter(heap.count() as u64);
     let valid = parts.into_par_iter().all(|(begin, end, part)| {
         let mut cursor = Cursor::new(&heap.dump, true);
         let mut written = 0;
@@ -579,6 +631,7 @@ fn build_references(heap: &ManagedHeap) -> Result<CompressedRows> {
                 written += 1;
             });
         }
+        copied((end - begin) as u64);
         written == part.len()
     });
     heap.dump.check()?;
@@ -713,7 +766,12 @@ impl<'a> Marker<'a> {
             }
         }
     }
-    fn mark(&mut self, runtime: Option<&RuntimeInfo>, options: AnalysisOptions) {
+    fn mark(
+        &mut self,
+        runtime: Option<&RuntimeInfo>,
+        options: AnalysisOptions,
+        progress: Progress<'_>,
+    ) {
         let heap = self.heap;
         let dump = &heap.dump;
         let source = |kind| RootSource {
@@ -789,6 +847,7 @@ impl<'a> Marker<'a> {
             .filter_map(|t| dump.segment_index(t.stack_pointer).map(|s| (s, t)))
             .collect();
         for (i, seg) in dump.segments.iter().enumerate() {
+            progress.portion(0.1, 0.8).items(i, dump.segments.len());
             if !seg.writable
                 || (seg.address < heap.high && seg.end() > heap.low)
                 || dump.exited_thread_stacks.contains(&i)
@@ -830,6 +889,7 @@ impl<'a> Marker<'a> {
             );
         }
         self.propagate();
+        progress.report(0.9);
         let pending_start = self.tail;
         for registered in [false, true] {
             let mut values = Vec::new();
@@ -867,6 +927,7 @@ impl<'a> Marker<'a> {
         for k in pending_start..self.tail {
             self.pending[self.queue[k] as usize] = 1;
         }
+        progress.report(1.0);
     }
 }
 
@@ -947,6 +1008,15 @@ pub fn dominators(
     store: &ColumnStore,
     weight: impl Fn(usize) -> u64,
 ) -> Result<(Column<i32>, Column<u64>, CompressedRows)> {
+    dominators_with_progress(graph, store, weight, Progress::none())
+}
+
+fn dominators_with_progress(
+    graph: &impl DominatorGraph,
+    store: &ColumnStore,
+    weight: impl Fn(usize) -> u64,
+    progress: Progress<'_>,
+) -> Result<(Column<i32>, Column<u64>, CompressedRows)> {
     let (total, root) = (graph.total(), graph.root());
     if total > i32::MAX as usize {
         return Err(Error("the dominator graph has too many nodes".into()));
@@ -978,6 +1048,9 @@ pub fn dominators(
             vertex[count] = w as i32;
             dfs_parent[count] = dfn[*v];
             count += 1;
+            if count % 4096 == 0 {
+                progress.portion(0.0, 0.3).items(count, graph.capacity());
+            }
             stack.push((w, graph.first_position(w)));
         } else {
             stack.pop();
@@ -1022,6 +1095,9 @@ pub fn dominators(
         label[v as usize]
     }
     for w in (1..count).rev() {
+        if w % 4096 == 0 {
+            progress.portion(0.3, 0.8).items(count - w, count);
+        }
         let p = dfs_parent[w] as usize;
         graph.predecessors(vertex[w] as usize, &mut |v| {
             if dfn[v] < 0 {
@@ -1084,5 +1160,6 @@ pub fn dominators(
             fill[p] += 1;
         }
     }
+    progress.report(1.0);
     Ok((idom, retained, CompressedRows { start, items }))
 }

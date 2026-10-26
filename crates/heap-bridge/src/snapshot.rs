@@ -160,8 +160,46 @@ impl Snapshot {
         }))
     }
 
-    pub fn info(&self) -> Result<SnapshotInfo> {
+    pub fn info(&self, progress: Option<Box<dyn Progress>>) -> Result<SnapshotInfo> {
         let s = &self.core;
+        let last = std::sync::Mutex::new((String::new(), 0.0));
+        let update = |phase: &str, fraction: f64| {
+            let mut last = last.lock().unwrap();
+            if let Some(progress) = &progress
+                && (phase != last.0 || fraction >= last.1 + 0.005 || fraction == 1.0)
+            {
+                progress.update(phase, fraction);
+                *last = (phase.into(), fraction);
+            }
+        };
+        let has_threads = s.graph.sources.iter().any(|source| {
+            matches!(
+                source.kind,
+                RootKind::Stack { .. }
+                    | RootKind::Registers { .. }
+                    | RootKind::ThreadStatics { .. }
+            )
+        });
+        if has_threads {
+            s.thread_stacks_with_progress(|fraction| {
+                update("Reading thread stacks", fraction * 0.75)
+            })?;
+        }
+        let source_names = (0..s.graph.sources.len())
+            .map(|i| s.describe_source(i))
+            .collect::<heap_core::Result<_>>()?;
+        let static_start = if has_threads { 0.75 } else { 0.0 };
+        let statics_arrays = s
+            .statics_arrays_with_progress(|fraction| {
+                update(
+                    "Reading static fields",
+                    static_start + fraction * (0.95 - static_start),
+                )
+            })?
+            .iter()
+            .copied()
+            .collect();
+        update("Preparing the view", 0.95);
         let mut categories = BTreeMap::<String, ResidencyCategory>::new();
         for mapping in s.smaps.iter().flatten() {
             let name = mapping.category(&s.heap);
@@ -179,16 +217,14 @@ impl Snapshot {
         }
         let mut residency_categories: Vec<_> = categories.into_values().collect();
         residency_categories.sort_by(|a, b| b.rss.cmp(&a.rss).then(a.name.cmp(&b.name)));
-        self.checked(Ok(SnapshotInfo {
+        let info = self.checked(Ok(SnapshotInfo {
             object_count: s.heap.count(),
             live_count: s.graph.live_count,
             live_bytes: s.graph.live_bytes,
             pending_count: s.graph.pending_count,
             pending_bytes: s.graph.pending_bytes,
-            source_names: (0..s.graph.sources.len())
-                .map(|i| s.describe_source(i))
-                .collect::<heap_core::Result<_>>()?,
-            statics_arrays: s.statics_arrays()?.iter().copied().collect(),
+            source_names,
+            statics_arrays,
             region_kinds: s.satori_region_kinds()?,
             handle_counts: s
                 .graph
@@ -218,7 +254,9 @@ impl Snapshot {
             size_classes: s.by_size_class(),
             occupancy: s.occupancy(),
             fragmentation_share: s.fragmentation_share(),
-        }))
+        }))?;
+        update("Preparing the view", 1.0);
+        Ok(info)
     }
 
     pub fn read_error(&self) -> Option<String> {
@@ -532,6 +570,17 @@ impl Snapshot {
         self.checked(self.core.chunk_groups())
     }
 
+    pub fn chunk_group(&self, chunk: Index) -> Result<Option<String>> {
+        let Ok(chunk) = i32::try_from(chunk) else {
+            return Ok(None);
+        };
+        Ok(self
+            .chunk_groups()?
+            .iter()
+            .find(|group| group.chunks.binary_search(&chunk).is_ok())
+            .map(|group| group.id.clone()))
+    }
+
     pub fn ownership_name(&self, node: Index) -> Result<String> {
         let graph = self.core.ownership()?;
         if node >= graph.count {
@@ -596,6 +645,16 @@ impl Snapshot {
 
     pub fn type_stats(&self) -> &[TypeStats] {
         &self.core.type_stats
+    }
+
+    pub fn type_retained(&self) -> Result<Arc<Vec<u64>>> {
+        self.checked(self.core.type_retained())
+    }
+    pub fn ownership_instances(&self, type_id: u32, limit: Index) -> Result<Vec<Index>> {
+        self.checked(self.core.ownership_instances(type_id, limit))
+    }
+    pub fn ownership_dominator_types(&self, type_id: u32) -> Result<Vec<OwnershipTypeGroup>> {
+        self.checked(self.core.ownership_dominator_types(type_id))
     }
 
     pub fn sources(&self) -> &[RootSource] {

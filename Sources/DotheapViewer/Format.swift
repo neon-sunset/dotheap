@@ -14,6 +14,12 @@ enum Format {
     }
 
     static func hex(_ v: UInt64) -> String { "0x" + String(v, radix: 16) }
+
+    static func retained(managed: UInt64, native: UInt64, nativeOwner: Bool) -> String {
+        let total = bytes(managed + native)
+        guard managed > 0, native > 0 else { return total }
+        return total + " (" + bytes(nativeOwner ? managed : native) + (nativeOwner ? " managed)" : " native)")
+    }
 }
 
 enum Palette {
@@ -131,7 +137,35 @@ struct MetricRow: Layout {
     }
 }
 
-/// A clickable object reference.
+struct AllocationLink: View {
+    @Environment(\.typeNameStyle) private var typeNameStyle
+    let name: String?
+    let address: UInt64
+    let size: UInt64?
+    var state: HeapGraph.ObjectState?
+    var help: String = ""
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Group {
+                    if let state { Circle().fill(Palette.state(state)).frame(width: 7, height: 7) }
+                    else { Image(systemName: "memorychip").font(.caption).foregroundStyle(Palette.native("malloc heap")) }
+                }
+                .frame(width: 12)
+                if let name {
+                    TypeNameText(name: name, style: state == nil && typeNameStyle == .initials ? .standard : typeNameStyle, color: .linkColor)
+                }
+                Text(Format.hex(address)).font(.caption.monospaced()).foregroundStyle(.secondary).fixedSize()
+                if let size { Text(Format.bytes(size)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize() }
+            }
+        }
+        .buttonStyle(.link)
+        .help(help)
+    }
+}
+
 struct ObjectLink: View {
     @Environment(Session.self) private var session
     let snapshot: HeapSnapshot
@@ -140,16 +174,30 @@ struct ObjectLink: View {
     var showType = true
 
     var body: some View {
-        Button {
+        let name = showType ? snapshot.typeName(ofObject: object) : nil
+        AllocationLink(name: name, address: snapshot.heap.addresses[object],
+                       size: showSize ? snapshot.heap.size(object) : nil, state: snapshot.graph.state(object), help: name ?? "") {
             session.select(object: object)
-        } label: {
-            HStack(spacing: 6) {
-                Circle().fill(Palette.state(snapshot.graph.state(object))).frame(width: 7, height: 7)
-                if showType { Text(TypeNames.short(snapshot.typeName(ofObject: object))).lineLimit(1).truncationMode(.middle) }
-                Text(Format.hex(snapshot.heap.addresses[object])).font(.caption.monospaced()).foregroundStyle(.secondary)
-                if showSize { Text(Format.bytes(snapshot.heap.size(object))).font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+        }
+    }
+}
+
+struct NativeLink: View {
+    @Environment(Session.self) private var session
+    let snapshot: HeapSnapshot
+    let chunk: Int
+    let name: String
+    var showSize = true
+    var help = ""
+
+    var body: some View {
+        ReadView {
+            let native = try snapshot.nativeGraph
+            let value = native.chunks[chunk]
+            AllocationLink(name: name, address: value.userStart, size: showSize ? value.size : nil,
+                           help: help.isEmpty ? name : help) {
+                session.select(chunk: chunk)
             }
         }
-        .buttonStyle(.link)
     }
 }

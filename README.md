@@ -213,7 +213,9 @@ and managed liveness do not depend on type names. Matching portable PDBs, embedd
 
 `symbols` downloads .NET runtime debug files for Linux dumps from Microsoft's symbol server and
 caches them by build ID. The Viewer downloads them automatically unless **File > Download Runtime
-Symbols When a Dump Opens** is disabled. The dump remains usable during download.
+Symbols When a Dump Opens** is disabled. Cached symbols are reused. Findings run without waiting
+for downloads; analysis refreshes when new symbols arrive. Large debug files can take several minutes
+to download in the background.
 
 Satori and other custom runtimes need debug files from their own builds, such as `libcoreclr.so.dbg`,
 in a `--dlls` directory. Native binaries are also sought at their recorded paths. Dotheap accepts
@@ -227,7 +229,7 @@ a binary only if its build ID matches, or its first page matches when no build I
 | `types`, `instances <type>` | Types by retained/live/dead bytes or count; instances by retained size or object size, with identifying strings and reachability filters. |
 | `object <address>`, `retained [<address>]` | Fields, contents, referrers and a root path; managed and native dominator children grouped by type. Without an address, `retained` lists root sources. |
 | `search <text>` | Matching findings, report rows, methods, callbacks, fields, types and native groups; an address identifies the memory there. |
-| `native`, `chunk <address>` | glibc malloc memory by owner and library, arena heaps, and one chunk's contents, owners and references. |
+| `native`, `chunk <address>` | glibc malloc memory by type or referrer and library; size distributions with `--group`, individual allocations, arena heaps, and reference evidence. |
 | `malloc-arenas` | Free and top-chunk memory by attached thread count; glibc parameters; estimated effects of `malloc_trim(0)`, trim/arena tunables and restart. |
 | `regions [<address>]`, `handles` | Regions grouped by generation, queue or size; one region and its types; GC handles by kind and target type. |
 | `memory`, `bytes <address>`, `find <value>` | Memory by kind; a hex dump with resolved 8-byte pointers; every detected occurrence of an 8-byte value in fields, chunks, stacks or other memory. |
@@ -276,7 +278,10 @@ Open `.dmp` or `.zst` files from Finder or **File > Open Dump…**. Each dump ha
 navigation and selections. Opening the same dump again brings its window forward. Opening an
 smaps file selects the dump beside it.
 
-Select an object to inspect fields, references and root paths. Search (⇧⌘F) finds types, methods,
+Select a managed object or native allocation to inspect it in the sidebar. Dominators and Roots
+include both kinds, with links to their references and root paths. Native Memory separates allocation
+groups, malloc heaps, mappings and overview statistics so each table has its own scrolling area.
+Search (⇧⌘F) finds types, methods,
 callbacks, findings, native classes, pages and addresses. Back and Forward (⌘[ and ⌘], or the
 mouse buttons) restore earlier pages and selections.
 
@@ -355,6 +360,15 @@ reads can also expand data into a temporary sparse file. Its disk use grows with
 pages accessed and can approach the expanded dump size. The file is removed when it is no longer
 in use. See [Residency and storage](docs/analysis.md#residency-and-storage) for the storage paths.
 Zstandard support is built in; analysis needs no installed `zstd` command.
+
+The Viewer offers to convert dumps that require sequential decompression. Conversion writes
+independent 256 KiB frames at compression level 3, using all available CPU cores.
+**Replace Original** verifies a temporary converted file before atomically replacing the source,
+then removes its obsolete compressed cache. **Keep Original…** saves a separate copy and copies
+an adjacent memory map. Both options reuse valid object and reference cache files and need
+temporary space for the compressed output. Cancellation or failure before replacement preserves
+the original. Conversion streams directly to compressed output; it does not write a full raw dump.
+**Open Original** uses the existing cache path. The suggestion can be disabled in Settings.
 
 ```sh
 dotheap cache                         # Cached analyses, source paths and disk use

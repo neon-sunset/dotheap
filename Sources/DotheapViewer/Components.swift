@@ -1,5 +1,61 @@
+import AppKit
 import HeapCore
 import SwiftUI
+
+enum PageInsets {
+    static let content: CGFloat = 16
+    static let detail: CGFloat = 12
+}
+
+struct PageToolbar<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                content()
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, PageInsets.content).padding(.vertical, 8)
+            Divider()
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct SegmentedPicker<Selection: Hashable>: NSViewRepresentable {
+    let title: String
+    let values: [Selection]
+    @Binding var selection: Selection
+    let label: (Selection) -> String
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(labels: values.map(label), trackingMode: .selectOne,
+                                         target: context.coordinator, action: #selector(Coordinator.select(_:)))
+        control.segmentStyle = .rounded
+        control.segmentDistribution = .fit
+        control.setAccessibilityLabel(title)
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.parent = self
+        if control.segmentCount != values.count { control.segmentCount = values.count }
+        for (index, value) in values.enumerated() { control.setLabel(label(value), forSegment: index) }
+        control.selectedSegment = values.firstIndex(of: selection) ?? -1
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject {
+        var parent: SegmentedPicker
+        init(_ parent: SegmentedPicker) { self.parent = parent }
+        @objc func select(_ control: NSSegmentedControl) {
+            guard parent.values.indices.contains(control.selectedSegment) else { return }
+            parent.selection = parent.values[control.selectedSegment]
+        }
+    }
+}
 
 struct ReadView<Content: View>: View {
     private let result: Result<Content, Error>

@@ -59,6 +59,7 @@ struct DotheapApp: App {
         }
         .defaultSize(width: 640, height: 760)
         .commandsRemoved()
+        Settings { SettingsView() }
     }
 }
 
@@ -73,6 +74,7 @@ struct DumpWindow: View {
         ContentView()
             .environment(session)
             .focusedSceneValue(session)
+            .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             .frame(minHeight: 700)
             .background(WindowSession(session: session, windows: windows))
             .handlesExternalEvents(preferring: Set(file.map { [$0.absoluteString] } ?? []), allowing: ["*"])
@@ -205,6 +207,7 @@ enum OpenPanel {
 struct ContentView: View {
     @Environment(Session.self) private var session
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("typeNameStyle") private var typeNameStyle = TypeNameStyle.standard
     private static let pageMinWidth: CGFloat = 640, inspectorMinWidth: CGFloat = 340
 
     var body: some View {
@@ -212,8 +215,12 @@ struct ContentView: View {
         Group {
             if session.loading {
                 VStack(spacing: 12) {
-                    ProgressView(value: session.fraction) { Text(session.phase) }.frame(width: 360)
+                    ProgressView(value: session.fraction) { Text(session.phase) }
+                        .frame(width: 360)
                     Text(session.dumpPath ?? "").font(.caption).foregroundStyle(.secondary)
+                    if session.converting {
+                        Button("Cancel", action: session.cancelConversion)
+                    }
                 }
             } else if let error = session.snapshot?.dump.readError {
                 ContentUnavailableView("Cannot read the dump", systemImage: "exclamationmark.triangle", description: Text(error))
@@ -283,6 +290,7 @@ struct ContentView: View {
                 WelcomeView()
             }
         }
+        .environment(\.typeNameStyle, typeNameStyle)
         .sheet(isPresented: $session.showProcesses) { ProcessListView() }
         .sheet(isPresented: $session.showVerification) {
             if let path = session.dumpPath { VerificationView(path: path, snapshot: session.snapshot) }

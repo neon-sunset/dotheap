@@ -6,40 +6,47 @@ import SwiftUI
 struct DominatorsView: View {
     let snapshot: HeapSnapshot
     @AppStorage("dominatorsGroupByType") private var groupByType = true
+    @State private var wide = true
 
     var body: some View {
-        Computed(snapshot, key: "ownership view", label: "Building the ownership graph", compute: { try $0.ownership }) { (o: OwnershipGraph) in
+        let grouped = groupByType
+        let wide = wide
+        return Computed(snapshot, key: "ownership view \(grouped)", label: "Building the ownership graph", compute: { snapshot in
+            let graph = try snapshot.ownership
+            if grouped { _ = try snapshot.ownershipGroups(of: graph.rootNode) }
+            return graph
+        }) { (o: OwnershipGraph) in
             VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Toggle("Group children by type", isOn: $groupByType)
-                    Spacer()
+                PageToolbar {
+                    Toggle("Group by type or referrer", isOn: $groupByType)
                 }
-                .padding(.horizontal, 16).padding(.top, 8)
                 HStack {
                     Text("Node").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    ForEach(["Size", "Managed", "Native"], id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary).frame(width: 90, alignment: .trailing) }
-                    Text("% of live").font(.caption).foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
+                    if wide { Text("Size").font(.caption).foregroundStyle(.secondary).frame(width: 90, alignment: .trailing) }
+                    Text("Retained").font(.caption).foregroundStyle(.secondary).frame(width: 230, alignment: .trailing)
+                    if wide { Text("% of live").font(.caption).foregroundStyle(.secondary).frame(width: 70, alignment: .trailing) }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 6)
                 Divider()
-                DominatorTree(snapshot: snapshot, graph: o, groupByType: groupByType).id(groupByType)
+                DominatorTree(snapshot: snapshot, graph: o, groupByType: groupByType, wide: wide).id(groupByType)
                 Divider()
-                Text("Managed and native sizes are bytes reachable only through this owner. Shared objects appear under their nearest common dominator; those shared across root sources appear directly under the root. A strong GC handle stored in a malloc chunk is attributed to that chunk, connecting native and managed ownership.")
-                    .font(.caption).foregroundStyle(.secondary).padding(8)
+                Text("Retained includes managed and native memory reachable only through this node. Parentheses show the native part for managed objects, or the managed part for native allocations. Shared objects appear under their nearest common dominator; those shared across root sources appear directly under the root. A strong GC handle stored in a malloc chunk is attributed to that chunk, connecting native and managed ownership.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal, PageInsets.content).padding(.vertical, 8)
             }
         }
+        .onGeometryChange(for: Bool.self) { $0.size.width >= 900 } action: { self.wide = $0 }
     }
 }
 
 /// The dominator tree as a list of rows: each open node shows its children (grouped by type, or one row each) below
-/// it. A click on a row opens or closes it. Children load when a node opens; a chain of single children opens on its
-/// own a few levels deep.
+/// it. Disclosure buttons expand nodes; selecting an allocation opens the inspector.
 struct DominatorTree: View {
     @Environment(Session.self) private var session
     let snapshot: HeapSnapshot
     let graph: OwnershipGraph
     let groupByType: Bool
+    let wide: Bool
     @State private var open: Set<String> = []
     @State private var limits: [String: Int] = [:]
     static let autoOpenDepth = 5
@@ -69,7 +76,7 @@ struct DominatorTree: View {
     private func id(_ item: Item, parent: String) -> String {
         switch item {
         case let .node(n): parent + "/" + String(n)
-        case let .group(g): parent + "/" + g.name
+        case let .group(g): parent + "/group/" + String(g.nodes[0])
         case let .more(p, _): p + "/more"
         }
     }
@@ -99,8 +106,8 @@ struct DominatorTree: View {
         ReadView {
             let displayed = try rows
             List(displayed) { row in
-                DominatorRow(snapshot: snapshot, graph: graph, row: row, open: open.contains(row.id)) {
-                    if case let .more(parent, _) = row.item { limits[parent, default: 100] += 200 } else if row.hasChildren { toggle(row.id) }
+                DominatorRow(snapshot: snapshot, graph: graph, row: row, open: open.contains(row.id), wide: wide) {
+                    if case let .more(parent, _) = row.item { limits[parent, default: 100] += 200 } else if row.hasChildren { toggle(row) }
                 }
                 .listRowInsets(EdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8))
             }
@@ -115,8 +122,17 @@ struct DominatorTree: View {
         }
     }
 
-    private func toggle(_ id: String) {
-        if open.contains(id) { open.remove(id) } else { open.insert(id) }
+    private func toggle(_ row: Row) {
+        if open.contains(row.id) { open.remove(row.id); return }
+        if groupByType, case let .node(node) = row.item {
+            let snapshot = snapshot
+            Task {
+                do {
+                    _ = try await Task.detached { try snapshot.ownershipGroups(of: node) }.value
+                    open.insert(row.id)
+                } catch { session.error = analysisErrorMessage(error) }
+            }
+        } else { open.insert(row.id) }
     }
 
     /// Opens the root and a chain of single children below it.
@@ -134,50 +150,68 @@ struct DominatorTree: View {
 }
 
 private struct DominatorRow: View {
+    @Environment(\.typeNameStyle) private var typeNameStyle
+    @Environment(Session.self) private var session
     let snapshot: HeapSnapshot
     let graph: OwnershipGraph
     let row: DominatorTree.Row
     let open: Bool
+    var wide = true
     let action: () -> Void
 
     var body: some View {
         ReadView {
             let display = try displayValues()
-            HStack(spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Color.clear.frame(width: CGFloat(row.depth) * 16, height: 1)
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(open ? 90 : 0))
-                    .frame(width: 18, height: 18)
-                    .opacity(row.hasChildren ? 1 : 0)
+                Button(action: action) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain).disabled(!row.hasChildren).opacity(row.hasChildren ? 1 : 0)
+                .accessibilityLabel(open ? "Collapse" : "Expand")
                 label(display.name, address: display.address)
                 Spacer(minLength: 8)
                 switch row.item {
                 case let .node(n):
-                    DominatorColumns(graph: graph, size: display.size, managed: graph.retainedManaged[n], native: graph.retainedNative[n])
+                    let nativeOwner = if case .chunk = graph.node(n) { true } else { false }
+                    DominatorColumns(graph: graph, size: display.size, managed: graph.retainedManaged[n], native: graph.retainedNative[n], nativeOwner: nativeOwner, wide: wide)
                 case let .group(g):
-                    DominatorColumns(graph: graph, size: display.size, managed: g.managed, native: g.native)
+                    DominatorColumns(graph: graph, size: display.size, managed: g.managed, native: g.native, nativeOwner: g.kind != nil, wide: wide)
                 case .more: EmptyView()
                 }
             }
+            .help("Allocation size: " + (display.size.map(Format.bytes) ?? "—") + "\n" + display.name)
             .contentShape(Rectangle())
-            .onTapGesture(perform: action)
+            .onTapGesture(perform: select)
         }
+    }
+
+    private func select() {
+        if case let .node(node) = row.item {
+            switch graph.node(node) {
+            case let .object(object): session.select(object: object)
+            case let .chunk(chunk): session.select(chunk: chunk)
+            default: action()
+            }
+        } else { action() }
     }
 
     private func displayValues() throws -> (name: String, address: UInt64?, size: UInt64?) {
         switch row.item {
         case let .node(node):
-            let name = try snapshot.ownershipName(node)
             switch graph.node(node) {
-            case let .object(i): return (name, nil, snapshot.heap.size(i))
+            case let .object(i): return (try snapshot.ownershipName(node), nil, snapshot.heap.size(i))
             case let .chunk(c):
-                let chunk = try snapshot.nativeGraph.chunks[c]
-                return (name, chunk.userStart, chunk.size)
-            default: return (name, nil, nil)
+                let native = try snapshot.nativeGraph
+                let chunk = native.chunks[c], attribution = try native.attribution(c)
+                return (attribution.kind.displayName(attribution.label), chunk.userStart, chunk.size)
+            default: return (try snapshot.ownershipName(node), nil, nil)
             }
         case let .group(group):
-            return (group.name, nil, group.size)
+            return (group.kind?.displayName(group.name) ?? group.name, nil, group.size)
         case .more: return ("", nil, nil)
         }
     }
@@ -187,15 +221,18 @@ private struct DominatorRow: View {
         case let .node(node):
             switch graph.node(node) {
             case let .object(i): ObjectLink(snapshot: snapshot, object: i, showSize: false)
-            case .chunk:
-                Label(TypeNames.short(name) + "  " + (address.map(Format.hex) ?? ""), systemImage: "memorychip")
-                    .lineLimit(1).truncationMode(.middle).help(name)
+            case let .chunk(chunk): NativeLink(snapshot: snapshot, chunk: chunk, name: name, showSize: false)
             case .root: Label("roots", systemImage: "circle.hexagongrid")
             case .source: Label(name, systemImage: "arrow.up.to.line").lineLimit(1)
             }
         case let .group(group):
-            Label("\(group.nodes.count.formatted()) × \(TypeNames.short(name))", systemImage: "square.stack.3d.up")
-                .lineLimit(1).truncationMode(.middle).help(name)
+            let count = group.nodes.count.formatted() + (group.kind == nil ? " × " : " chunks · ")
+            HStack(spacing: 4) {
+                Image(systemName: "square.stack.3d.up")
+                Text(count).fixedSize()
+                TypeNameText(name: name, style: group.kind == nil ? typeNameStyle : .standard, singleLine: true)
+            }
+            .help([name, group.kind?.title, group.library].compactMap { $0 }.joined(separator: "\n"))
         case let .more(_, remaining): Text("\(remaining.formatted()) more…").foregroundStyle(Color.accentColor)
         }
     }
@@ -208,69 +245,16 @@ struct DominatorColumns: View {
     let size: UInt64?
     let managed: UInt64
     let native: UInt64
+    let nativeOwner: Bool
+    let wide: Bool
 
     var body: some View {
-        Text(size.map(Format.bytes) ?? "").monospacedDigit().frame(width: 90, alignment: .trailing)
-        Text(managed > 0 ? Format.bytes(managed) : "").monospacedDigit().frame(width: 90, alignment: .trailing)
-        Text(native > 0 ? Format.bytes(native) : "").monospacedDigit().frame(width: 90, alignment: .trailing)
-        Text(Format.percent(Double(managed + native), Double(graph.retained(graph.rootNode)))).monospacedDigit().foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
-    }
-}
-
-/// Root sources: where the conservative scan found references into the heap.
-struct RootsView: View {
-    let snapshot: HeapSnapshot
-    @State private var selected: Int?
-    @State private var order: TableSort? = TableSort(column: "Retained only by this source", ascending: false)
-    @State private var handleOrder: TableSort? = TableSort(column: "Handles", ascending: false)
-
-    struct Row: Identifiable {
-        let id: Int
-        let name: String
-        let objects: Int
-        let retained: UInt64
-    }
-
-    var body: some View {
-        let graph = snapshot.graph
-        let rows: [Row] = snapshot.memo("root rows") {
-            graph.sources.indices.filter { !graph.rootObjects(of: $0).isEmpty }.map { source in
-                Row(id: source, name: snapshot.describe(source: source), objects: graph.rootObjects(of: source).count,
-                    retained: graph.retained[snapshot.heap.count + source])
-            }
-        }
-        return content(rows, snapshot.handleGroups())
-    }
-
-    private func content(_ rows: [Row], _ handles: RustArray<HeapSnapshot.HandleGroup>) -> some View {
-        let graph = snapshot.graph
-        return SplitPanes(axis: .horizontal, firstMin: 520, secondMin: 360, initial: 0.65, showSecond: selected != nil) {
-            SplitPanes(axis: .vertical, firstMin: 200, secondMin: 160, initial: 0.6) {
-                TextTable(rows: rows, columns: [
-                    .init("Source", width: 300, flexible: true, truncation: .byTruncatingMiddle, value: \.name, text: \.name, help: { $0.name }),
-                    .init("Objects referenced", width: 120, font: .digits, value: \.objects, text: { $0.objects.formatted() }),
-                    .init("Retained only by this source", width: 170, font: .digits, value: \.retained, text: { Format.bytes($0.retained) }),
-                ], sort: $order, selection: selected, select: { selected = $0 })
-            } second: {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("GC handles: " + graph.handleCounts.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value.formatted())" }.joined(separator: ", "))
-                        .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8).padding(.top, 6)
-                    TextTable(rows: handles, columns: [
-                        .init("Handle type", width: 110, value: \.handleType, text: \.handleType),
-                        .init("Target type", width: 260, flexible: true, truncation: .byTruncatingMiddle, value: \.targetType,
-                              text: { TypeNames.short($0.targetType) }, help: { $0.targetType }),
-                        .init("Handles", width: 70, font: .digits, value: \.count, text: { $0.count.formatted() }),
-                        .init("Live targets", width: 80, font: .digits, value: \.liveTargets, text: { $0.liveTargets.formatted() }),
-                        .init("Target bytes", width: 90, font: .digits, value: \.targetBytes, text: { Format.bytes($0.targetBytes) }),
-                    ], sort: $handleOrder)
-                }
-            }
-        } second: {
-            if let s = selected {
-                SampleList(snapshot: snapshot, title: snapshot.describe(source: s), samples: Array(graph.rootObjects(of: s).prefix(2000)).map(Int.init)) {
-                    Format.bytes(graph.retained[$0])
-                }
-            }
+        if wide { Text(size.map(Format.bytes) ?? "").monospacedDigit().frame(width: 90, alignment: .trailing) }
+        Text(Format.retained(managed: managed, native: native, nativeOwner: nativeOwner))
+            .monospacedDigit().frame(width: 230, alignment: .trailing)
+            .help("Managed: " + Format.bytes(managed) + "\nNative: " + Format.bytes(native))
+        if wide {
+            Text(Format.percent(Double(managed + native), Double(graph.retained(graph.rootNode)))).monospacedDigit().foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
         }
     }
 }

@@ -4,6 +4,7 @@ use crate::{
     bytes::ReadBytes,
     code_map::{CodeMap, LocationKind},
     graph::RootKind,
+    progress::Progress,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
@@ -44,6 +45,19 @@ impl HeapSnapshot {
     pub fn thread_stacks(&self) -> Result<Arc<ThreadStacks>> {
         self.memo("thread stacks", || ThreadStacks::new(self))
     }
+    pub fn thread_stacks_with_progress(
+        &self,
+        progress: impl Fn(f64) + Sync,
+    ) -> Result<Arc<ThreadStacks>> {
+        let update = |_: &str, fraction| progress(fraction);
+        let progress = Progress::new(&update);
+        progress.report(0.0);
+        let stacks = self.memo("thread stacks", || {
+            ThreadStacks::new_with_progress(self, progress)
+        })?;
+        progress.report(1.0);
+        Ok(stacks)
+    }
     pub fn describe_source(&self, s: usize) -> Result<String> {
         let source = &self.graph.sources[s];
         Ok(match source.kind {
@@ -81,8 +95,13 @@ impl HeapSnapshot {
 }
 impl ThreadStacks {
     pub fn new(s: &HeapSnapshot) -> Result<Self> {
+        Self::new_with_progress(s, Progress::none())
+    }
+
+    fn new_with_progress(s: &HeapSnapshot, progress: Progress<'_>) -> Result<Self> {
         let dump = &s.dump;
         let code = s.code_map()?;
+        progress.report(0.1);
         let mut runtime_threads = HashMap::new();
         if let Some(runtime) = &s.runtime
             && let Some(d) = &runtime.descriptor
@@ -128,7 +147,12 @@ impl ThreadStacks {
             }
         }
         let mut threads = Vec::new();
-        for t in &dump.threads {
+        for (index, t) in dump.threads.iter().enumerate() {
+            let thread_progress = progress.portion(0.2, 1.0).portion(
+                index as f64 / dump.threads.len() as f64,
+                (index + 1) as f64 / dump.threads.len() as f64,
+            );
+            thread_progress.report(0.0);
             let (object, name) = runtime_threads.remove(&t.tid).unwrap_or_default();
             let mut info = ThreadInfo {
                 tid: t.tid,
@@ -152,6 +176,9 @@ impl ThreadStacks {
                     {
                         deepest = Some(seg.address + ((a - seg.address + k as u64) / 4096) * 4096);
                     }
+                    thread_progress
+                        .portion(0.0, 0.4)
+                        .items((a - seg.address) as usize + bytes.len(), seg.size as usize);
                 });
                 info.deepest_touched = deepest.unwrap_or(seg.end()).min(t.stack_pointer);
                 let start = t.stack_pointer & !7;
@@ -172,11 +199,17 @@ impl ThreadStacks {
                                 });
                             }
                         }
+                        thread_progress.portion(0.4, 1.0).items(
+                            (a - start) as usize + bytes.len(),
+                            (seg.end() - start) as usize,
+                        );
                     });
                 }
             }
             threads.push(info);
+            thread_progress.report(1.0);
         }
+        progress.report(1.0);
         Ok(Self { threads, code })
     }
     pub fn thread(&self, tid: i32) -> Option<&ThreadInfo> {

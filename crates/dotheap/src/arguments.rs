@@ -268,6 +268,8 @@ pub fn parse(raw: &[String]) -> Result<Parsed, String> {
         "--text",
         "--reach",
         "--library",
+        "--group",
+        "--size",
         "--by",
         "--top",
         "--explain",
@@ -358,6 +360,14 @@ pub fn parse(raw: &[String]) -> Result<Parsed, String> {
             && !value.parse::<i64>().is_ok_and(|n| n >= 0)
         {
             return Err(format!("{option} needs a non-negative integer"));
+        }
+    }
+    if let Some(size) = a.value("--size") {
+        if size.parse::<u64>().is_err() {
+            return Err("--size needs a chunk size in bytes".into());
+        }
+        if a.value("--group").is_none() {
+            return Err("--size requires --group; use native to list group IDs".into());
         }
     }
     let usage = c.map(|c| c.usage.as_str()).unwrap_or("<core>");

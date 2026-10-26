@@ -187,9 +187,62 @@ public struct Chunk: @unchecked Sendable, Equatable {
     }
 }
 
-func read_Reach(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Reach { Reach.read(pointer, owner) }
+func read_ChunkAttributionKind(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> ChunkAttributionKind { ChunkAttributionKind.read(pointer, owner) }
 
 func read_Option_String(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> String? { dh_read_Option_String(pointer).map { read_String($0, owner) } }
+
+func read_Option_usize(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Int? { dh_read_Option_usize(pointer).map { read_usize($0, owner) } }
+
+public struct ChunkAttribution: @unchecked Sendable, Equatable {
+    let _pointer: UnsafeRawPointer
+    let _owner: RustOwner
+    init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var kind: ChunkAttributionKind { withExtendedLifetime(_owner) { read_ChunkAttributionKind(dh_ChunkAttribution_kind(_pointer)!, _owner) } }
+    public var label: String { withExtendedLifetime(_owner) { read_String(dh_ChunkAttribution_label(_pointer)!, _owner) } }
+    public var library: String? { withExtendedLifetime(_owner) { read_Option_String(dh_ChunkAttribution_library(_pointer)!, _owner) } }
+    public var sourceChunk: Int? { withExtendedLifetime(_owner) { read_Option_usize(dh_ChunkAttribution_source_chunk(_pointer)!, _owner) } }
+    public var sourceObject: Int? { withExtendedLifetime(_owner) { read_Option_usize(dh_ChunkAttribution_source_object(_pointer)!, _owner) } }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        if lhs._pointer == rhs._pointer { return true }
+        return lhs.kind == rhs.kind &&
+            lhs.label == rhs.label &&
+            lhs.library == rhs.library &&
+            lhs.sourceChunk == rhs.sourceChunk &&
+            lhs.sourceObject == rhs.sourceObject
+    }
+}
+
+public enum ChunkAttributionKind: Sendable, Hashable {
+    case cppType
+    case cppDominator
+    case cppReferrer
+    case cppInteriorReferrer
+    case managedDominator
+    case managedReferrer
+    case nativeRoot
+    case symbol
+    case library
+    case text
+    case unknown
+    static func read(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Self {
+        switch dh_tag_ChunkAttributionKind(pointer) {
+        case 0: return .cppType
+        case 1: return .cppDominator
+        case 2: return .cppReferrer
+        case 3: return .cppInteriorReferrer
+        case 4: return .managedDominator
+        case 5: return .managedReferrer
+        case 6: return .nativeRoot
+        case 7: return .symbol
+        case 8: return .library
+        case 9: return .text
+        case 10: return .unknown
+        default: preconditionFailure("Invalid Rust ChunkAttributionKind")
+        }
+    }
+}
+
+func read_Reach(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Reach { Reach.read(pointer, owner) }
 
 func read_i32(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Int32 { pointer.load(as: Int32.self) }
 
@@ -199,17 +252,40 @@ public struct ChunkGroup: @unchecked Sendable, Equatable {
     let _pointer: UnsafeRawPointer
     let _owner: RustOwner
     init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var id: String { withExtendedLifetime(_owner) { read_String(dh_ChunkGroup_id(_pointer)!, _owner) } }
     public var label: String { withExtendedLifetime(_owner) { read_String(dh_ChunkGroup_label(_pointer)!, _owner) } }
+    public var kind: ChunkAttributionKind { withExtendedLifetime(_owner) { read_ChunkAttributionKind(dh_ChunkGroup_kind(_pointer)!, _owner) } }
     public var reach: Reach { withExtendedLifetime(_owner) { read_Reach(dh_ChunkGroup_reach(_pointer)!, _owner) } }
     public var library: String? { withExtendedLifetime(_owner) { read_Option_String(dh_ChunkGroup_library(_pointer)!, _owner) } }
     public var chunks: RustArray<Int32> { withExtendedLifetime(_owner) { read_Vec_i32(dh_ChunkGroup_chunks(_pointer)!, _owner) } }
     public var bytes: UInt64 { withExtendedLifetime(_owner) { dh_ChunkGroup_bytes(_pointer) } }
+    public var minSize: UInt64 { withExtendedLifetime(_owner) { dh_ChunkGroup_min_size(_pointer) } }
+    public var maxSize: UInt64 { withExtendedLifetime(_owner) { dh_ChunkGroup_max_size(_pointer) } }
     public static func == (lhs: Self, rhs: Self) -> Bool {
         if lhs._pointer == rhs._pointer { return true }
-        return lhs.label == rhs.label &&
+        return lhs.id == rhs.id &&
+            lhs.label == rhs.label &&
+            lhs.kind == rhs.kind &&
             lhs.reach == rhs.reach &&
             lhs.library == rhs.library &&
             lhs.chunks == rhs.chunks &&
+            lhs.bytes == rhs.bytes &&
+            lhs.minSize == rhs.minSize &&
+            lhs.maxSize == rhs.maxSize
+    }
+}
+
+public struct ChunkSizeGroup: @unchecked Sendable, Equatable {
+    let _pointer: UnsafeRawPointer
+    let _owner: RustOwner
+    init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var size: UInt64 { withExtendedLifetime(_owner) { _pointer.assumingMemoryBound(to: DHChunkSizeGroup.self).pointee.size } }
+    public var count: Int { withExtendedLifetime(_owner) { Int(_pointer.assumingMemoryBound(to: DHChunkSizeGroup.self).pointee.count) } }
+    public var bytes: UInt64 { withExtendedLifetime(_owner) { _pointer.assumingMemoryBound(to: DHChunkSizeGroup.self).pointee.bytes } }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        if lhs._pointer == rhs._pointer { return true }
+        return lhs.size == rhs.size &&
+            lhs.count == rhs.count &&
             lhs.bytes == rhs.bytes
     }
 }
@@ -380,8 +456,6 @@ public struct FieldInfo: @unchecked Sendable, Equatable {
 }
 
 func read_FieldInfo(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> FieldInfo { FieldInfo(pointer: pointer, owner: owner) }
-
-func read_Option_usize(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Int? { dh_read_Option_usize(pointer).map { read_usize($0, owner) } }
 
 func read_FieldValue(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> FieldValue { FieldValue(pointer: pointer, owner: owner) }
 
@@ -964,7 +1038,7 @@ public struct NativeChunkInfo: @unchecked Sendable, Equatable {
     public var className: String? { withExtendedLifetime(_owner) { read_Option_String(dh_NativeChunkInfo_class_name(_pointer)!, _owner) } }
     public var library: String? { withExtendedLifetime(_owner) { read_Option_String(dh_NativeChunkInfo_library(_pointer)!, _owner) } }
     public var owner: Int? { withExtendedLifetime(_owner) { read_Option_usize(dh_NativeChunkInfo_owner(_pointer)!, _owner) } }
-    public var rootSource: String? { withExtendedLifetime(_owner) { read_Option_String(dh_NativeChunkInfo_root_source(_pointer)!, _owner) } }
+    public var rootSources: RustArray<String> { withExtendedLifetime(_owner) { read_Vec_String(dh_NativeChunkInfo_root_sources(_pointer)!, _owner) } }
     public var pointers: RustArray<Int32> { withExtendedLifetime(_owner) { read_Vec_i32(dh_NativeChunkInfo_pointers(_pointer)!, _owner) } }
     public var referrers: RustArray<Int32> { withExtendedLifetime(_owner) { read_Vec_i32(dh_NativeChunkInfo_referrers(_pointer)!, _owner) } }
     public var owners: RustArray<Int> { withExtendedLifetime(_owner) { read_Vec_usize(dh_NativeChunkInfo_owners(_pointer)!, _owner) } }
@@ -977,7 +1051,7 @@ public struct NativeChunkInfo: @unchecked Sendable, Equatable {
             lhs.className == rhs.className &&
             lhs.library == rhs.library &&
             lhs.owner == rhs.owner &&
-            lhs.rootSource == rhs.rootSource &&
+            lhs.rootSources == rhs.rootSources &&
             lhs.pointers == rhs.pointers &&
             lhs.referrers == rhs.referrers &&
             lhs.owners == rhs.owners &&
@@ -1295,11 +1369,15 @@ public struct OwnershipEntry: @unchecked Sendable, Equatable {
     }
 }
 
+func read_Option_ChunkAttributionKind(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> ChunkAttributionKind? { dh_read_Option_ChunkAttributionKind(pointer).map { read_ChunkAttributionKind($0, owner) } }
+
 public struct OwnershipGroup: @unchecked Sendable, Equatable {
     let _pointer: UnsafeRawPointer
     let _owner: RustOwner
     init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
     public var name: String { withExtendedLifetime(_owner) { read_String(dh_OwnershipGroup_name(_pointer)!, _owner) } }
+    public var kind: ChunkAttributionKind? { withExtendedLifetime(_owner) { read_Option_ChunkAttributionKind(dh_OwnershipGroup_kind(_pointer)!, _owner) } }
+    public var library: String? { withExtendedLifetime(_owner) { read_Option_String(dh_OwnershipGroup_library(_pointer)!, _owner) } }
     public var nodes: RustArray<Int> { withExtendedLifetime(_owner) { read_Vec_usize(dh_OwnershipGroup_nodes(_pointer)!, _owner) } }
     public var size: UInt64 { withExtendedLifetime(_owner) { dh_OwnershipGroup_size(_pointer) } }
     public var managed: UInt64 { withExtendedLifetime(_owner) { dh_OwnershipGroup_managed(_pointer) } }
@@ -1307,6 +1385,8 @@ public struct OwnershipGroup: @unchecked Sendable, Equatable {
     public static func == (lhs: Self, rhs: Self) -> Bool {
         if lhs._pointer == rhs._pointer { return true }
         return lhs.name == rhs.name &&
+            lhs.kind == rhs.kind &&
+            lhs.library == rhs.library &&
             lhs.nodes == rhs.nodes &&
             lhs.size == rhs.size &&
             lhs.managed == rhs.managed &&
@@ -1342,6 +1422,50 @@ public enum OwnershipNode: Sendable, Hashable {
         case 3: return .chunk(read_usize(dh_OwnershipNode_Chunk_v0(pointer)!, owner))
         default: preconditionFailure("Invalid Rust OwnershipNode")
         }
+    }
+}
+
+public struct OwnershipRoot: @unchecked Sendable, Equatable {
+    let _pointer: UnsafeRawPointer
+    let _owner: RustOwner
+    init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var node: Int { withExtendedLifetime(_owner) { Int(dh_OwnershipRoot_node(_pointer)) } }
+    public var name: String { withExtendedLifetime(_owner) { read_String(dh_OwnershipRoot_name(_pointer)!, _owner) } }
+    public var objects: Int { withExtendedLifetime(_owner) { Int(dh_OwnershipRoot_objects(_pointer)) } }
+    public var chunks: Int { withExtendedLifetime(_owner) { Int(dh_OwnershipRoot_chunks(_pointer)) } }
+    public var managed: UInt64 { withExtendedLifetime(_owner) { dh_OwnershipRoot_managed(_pointer) } }
+    public var native: UInt64 { withExtendedLifetime(_owner) { dh_OwnershipRoot_native(_pointer) } }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        if lhs._pointer == rhs._pointer { return true }
+        return lhs.node == rhs.node &&
+            lhs.name == rhs.name &&
+            lhs.objects == rhs.objects &&
+            lhs.chunks == rhs.chunks &&
+            lhs.managed == rhs.managed &&
+            lhs.native == rhs.native
+    }
+}
+
+func read_u32(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> UInt32 { pointer.load(as: UInt32.self) }
+
+func read_Option_u32(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> UInt32? { dh_read_Option_u32(pointer).map { read_u32($0, owner) } }
+
+public struct OwnershipTypeGroup: @unchecked Sendable, Equatable {
+    let _pointer: UnsafeRawPointer
+    let _owner: RustOwner
+    init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var name: String { withExtendedLifetime(_owner) { read_String(dh_OwnershipTypeGroup_name(_pointer)!, _owner) } }
+    public var typeId: UInt32? { withExtendedLifetime(_owner) { read_Option_u32(dh_OwnershipTypeGroup_type_id(_pointer)!, _owner) } }
+    public var objects: Int { withExtendedLifetime(_owner) { Int(dh_OwnershipTypeGroup_objects(_pointer)) } }
+    public var bytes: UInt64 { withExtendedLifetime(_owner) { dh_OwnershipTypeGroup_bytes(_pointer) } }
+    public var nodes: RustArray<Int> { withExtendedLifetime(_owner) { read_Vec_usize(dh_OwnershipTypeGroup_nodes(_pointer)!, _owner) } }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        if lhs._pointer == rhs._pointer { return true }
+        return lhs.name == rhs.name &&
+            lhs.typeId == rhs.typeId &&
+            lhs.objects == rhs.objects &&
+            lhs.bytes == rhs.bytes &&
+            lhs.nodes == rhs.nodes
     }
 }
 
@@ -1796,8 +1920,6 @@ public struct SearchResult: @unchecked Sendable, Equatable {
             lhs.bytes == rhs.bytes
     }
 }
-
-func read_u32(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> UInt32 { pointer.load(as: UInt32.self) }
 
 public enum SearchTarget: Sendable, Hashable {
     case finding(String?)
@@ -2345,8 +2467,6 @@ public struct ThreadState: @unchecked Sendable, Equatable {
     }
 }
 
-func read_Option_u32(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> UInt32? { dh_read_Option_u32(pointer).map { read_u32($0, owner) } }
-
 public struct TimerInfo: @unchecked Sendable, Equatable {
     let _pointer: UnsafeRawPointer
     let _owner: RustOwner
@@ -2695,6 +2815,10 @@ func read_MethodTableInfo(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Me
 
 func read_TypeStats(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> TypeStats { TypeStats(pointer: pointer, owner: owner) }
 
+func read_OwnershipTypeGroup(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> OwnershipTypeGroup { OwnershipTypeGroup(pointer: pointer, owner: owner) }
+
+func read_Vec_OwnershipTypeGroup(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RustArray<OwnershipTypeGroup> { RustArray(dh_read_Vec_OwnershipTypeGroup(pointer), owner: owner, read: read_OwnershipTypeGroup) }
+
 func read_RootSource(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RootSource { RootSource(pointer: pointer, owner: owner) }
 
 func read_GcHandle(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> GcHandle { GcHandle(pointer: pointer, owner: owner) }
@@ -2725,6 +2849,16 @@ func read_NativeChunkInfo(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Na
 
 func read_Option_NativeChunkInfo(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> NativeChunkInfo? { dh_read_Option_NativeChunkInfo(pointer).map { read_NativeChunkInfo($0, owner) } }
 
+func read_ChunkSizeGroup(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> ChunkSizeGroup { ChunkSizeGroup(pointer: pointer, owner: owner) }
+
+func read_Vec_ChunkSizeGroup(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RustArray<ChunkSizeGroup> { RustArray(dh_read_Vec_ChunkSizeGroup(pointer), owner: owner, read: read_ChunkSizeGroup) }
+
+func read_ChunkAttribution(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> ChunkAttribution { ChunkAttribution(pointer: pointer, owner: owner) }
+
+func read_OwnershipRoot(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> OwnershipRoot { OwnershipRoot(pointer: pointer, owner: owner) }
+
+func read_Vec_OwnershipRoot(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RustArray<OwnershipRoot> { RustArray(dh_read_Vec_OwnershipRoot(pointer), owner: owner, read: read_OwnershipRoot) }
+
 func read_OwnershipInfo(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> OwnershipInfo { OwnershipInfo(pointer: pointer, owner: owner) }
 
 func read_OwnershipEntry(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> OwnershipEntry { OwnershipEntry(pointer: pointer, owner: owner) }
@@ -2752,6 +2886,29 @@ func read_Vec_Process(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RustAr
 public func processes() -> RustArray<Process> {
     let result = checked(dh_processes())
     return withExtendedLifetime(result) { read_Vec_Process(result.pointer, result) }
+}
+
+public func dumpNeedsConversion(path: String) throws -> Bool {
+    return try withRustString(path) { path in
+        let result = try take(dh_dump_needs_conversion(path))
+        return withExtendedLifetime(result) { read_bool(result.pointer, result) }
+    }
+}
+
+public func convertDump(source: String, target: String?, progress: (any Progress)) throws -> RustArray<String> {
+    return try withRustString(source) { source in
+        return try withOptionalRustString(target) { target in
+            let result = try take(dh_convert_dump(source, target, transferProgress(progress)))
+            return withExtendedLifetime(result) { read_Vec_String(result.pointer, result) }
+        }
+    }
+}
+
+public func smapsNextToDump(path: String) -> String? {
+    return withRustString(path) { path in
+        let result = checked(dh_smaps_next_to_dump(path))
+        return withExtendedLifetime(result) { read_Option_String(result.pointer, result) }
+    }
 }
 
 public func defaultDumpPath(process: Process) throws -> String {
@@ -2908,9 +3065,9 @@ public final class Snapshot: @unchecked Sendable {
             }
         }
     }
-    public func info() throws -> SnapshotInfo {
+    public func info(progress: (any Progress)?) throws -> SnapshotInfo {
         return try withExtendedLifetime((owner)) {
-            let result = try take(dh_Snapshot_info(pointer))
+            let result = try take(dh_Snapshot_info(pointer, progress.map(transferProgress) ?? DHProgress()))
             return withExtendedLifetime(result) { read_SnapshotInfo(result.pointer, result) }
         }
     }
@@ -3273,6 +3430,12 @@ public final class Snapshot: @unchecked Sendable {
             return withExtendedLifetime(result) { read_Vec_ChunkGroup(result.pointer, result) }
         }
     }
+    public func chunkGroup(chunk: Int) throws -> String? {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_Snapshot_chunk_group(pointer, UInt(chunk)))
+            return withExtendedLifetime(result) { read_Option_String(result.pointer, result) }
+        }
+    }
     public func ownershipName(node: Int) throws -> String {
         return try withExtendedLifetime((owner)) {
             let result = try take(dh_Snapshot_ownership_name(pointer, UInt(node)))
@@ -3319,6 +3482,24 @@ public final class Snapshot: @unchecked Sendable {
         return withExtendedLifetime((owner)) {
             let value = dh_Snapshot_type_stats(pointer)
             return RustArray(value, owner: owner, read: read_TypeStats)
+        }
+    }
+    public func typeRetained() throws -> RustArray<UInt64> {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_Snapshot_type_retained(pointer))
+            return withExtendedLifetime(result) { read_Vec_u64(result.pointer, result) }
+        }
+    }
+    public func ownershipInstances(typeId: UInt32, limit: Int) throws -> RustArray<Int> {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_Snapshot_ownership_instances(pointer, typeId, UInt(limit)))
+            return withExtendedLifetime(result) { read_Vec_usize(result.pointer, result) }
+        }
+    }
+    public func ownershipDominatorTypes(typeId: UInt32) throws -> RustArray<OwnershipTypeGroup> {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_Snapshot_ownership_dominator_types(pointer, typeId))
+            return withExtendedLifetime(result) { read_Vec_OwnershipTypeGroup(result.pointer, result) }
         }
     }
     public func sources() -> RustArray<RootSource> {
@@ -3544,10 +3725,27 @@ public final class NativeGraphView: @unchecked Sendable {
             return dh_NativeGraphView_is_root_chunk(pointer, chunk)
         }
     }
-    public func largestChunks(chunks: RustArray<Int32>, limit: Int) throws -> RustArray<Int32> {
+    public func largestChunks(chunks: RustArray<Int32>, size: UInt64, limit: Int) throws -> RustArray<Int32> {
         return try withExtendedLifetime((owner, chunks)) {
-            let result = try take(dh_NativeGraphView_largest_chunks(pointer, chunks.storage, UInt(limit)))
+            let result = try take(dh_NativeGraphView_largest_chunks(pointer, chunks.storage, size, UInt(limit)))
             return withExtendedLifetime(result) { read_Vec_i32(result.pointer, result) }
+        }
+    }
+    public func chunkSizes(chunks: RustArray<Int32>) throws -> RustArray<ChunkSizeGroup> {
+        return try withExtendedLifetime((owner, chunks)) {
+            let result = try take(dh_NativeGraphView_chunk_sizes(pointer, chunks.storage))
+            return withExtendedLifetime(result) { read_Vec_ChunkSizeGroup(result.pointer, result) }
+        }
+    }
+    public func attribution(chunk: Int) throws -> ChunkAttribution {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_NativeGraphView_attribution(pointer, UInt(chunk)))
+            return withExtendedLifetime(result) { read_ChunkAttribution(result.pointer, result) }
+        }
+    }
+    public func pointerIsExact(source: Int, target: Int) -> Bool {
+        return withExtendedLifetime((owner)) {
+            return dh_NativeGraphView_pointer_is_exact(pointer, UInt(source), UInt(target))
         }
     }
     public func nativeRetained(object: Int) -> UInt64 {
@@ -3591,6 +3789,18 @@ public final class OwnershipView: @unchecked Sendable {
     let owner: RustOwner
     var pointer: UnsafeRawPointer { owner.pointer }
     init(owner: RustOwner) { self.owner = owner }
+    public func roots() -> RustArray<OwnershipRoot> {
+        return withExtendedLifetime((owner)) {
+            let result = checked(dh_OwnershipView_roots(pointer))
+            return withExtendedLifetime(result) { read_Vec_OwnershipRoot(result.pointer, result) }
+        }
+    }
+    public func rootReferences(node: Int) -> RustArray<Int32> {
+        return withExtendedLifetime((owner)) {
+            let value = dh_OwnershipView_root_references(pointer, UInt(node))
+            return RustArray(value, owner: owner, read: read_i32)
+        }
+    }
     public func info() -> OwnershipInfo {
         return withExtendedLifetime((owner)) {
             let result = checked(dh_OwnershipView_info(pointer))

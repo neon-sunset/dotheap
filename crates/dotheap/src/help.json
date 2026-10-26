@@ -82,13 +82,15 @@
     {
       "name": "native",
       "usage": "<core>",
-      "summary": "glibc allocations by owner and library, plus arena totals (Linux)",
+      "summary": "glibc allocations by type or referrer, plus arena totals (Linux)",
       "options": [
         "--reach native|live|pending|dead|unreferenced",
         "--match <text>    groups whose label contains the text",
-        "--library <name>"
+        "--library <name>",
+        "--group <id>      size distribution and allocations for a group",
+        "--size <bytes>    allocations of this size within --group"
       ],
-      "details": "Groups glibc malloc chunks by what holds them: native roots, managed owners\nor other chunks. Includes C++ class and library names and arena heaps by\nresident free memory. Unreferenced chunks are leak candidates. Use chunk\nfor one allocation and malloc-arenas for free memory retained by glibc."
+      "details": "Groups glibc malloc chunks by identified type or reference source, across\nall chunk sizes. Each chunk is counted once. Sizes include malloc headers\nand padding. --group shows exact-size groups and individual allocations;\nuse --size to select one size and --limit 0 to list all rows. Use chunk\nfor reference evidence and malloc-arenas for free memory retained by glibc.\nNative pointer matches are conservative; unreferenced chunks are leak candidates."
     },
     {
       "name": "malloc-arenas",

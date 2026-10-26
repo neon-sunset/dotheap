@@ -276,7 +276,7 @@ struct TaskGraphView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if graph.isShared, let object = graph.waitedOn {
-                        HStack(spacing: 8) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Image(systemName: "arrow.triangle.merge").foregroundStyle(Color.accentColor)
                             Text("\(graph.tasks) tasks wait on one object").fontWeight(.semibold)
                             ObjectLink(snapshot: snapshot, object: object)
@@ -299,7 +299,7 @@ struct TaskGraphView: View {
                             .onTapGesture { session.taskNode = line.path }
                     }
                 }
-                .padding(10)
+                .padding(PageInsets.detail)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         } second: {
@@ -428,7 +428,7 @@ private struct TaskNodeDetail: View {
                 }
                 RootPath(snapshot: snapshot, object: object)
             }
-            .padding(10)
+            .padding(PageInsets.detail)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -491,7 +491,7 @@ struct RootPath: View {
                 Text("The object below is " + local + " (the frame is estimated from return addresses).").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
             ForEach(Array(m.objects.enumerated()), id: \.offset) { k, o in
-                HStack(spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     ObjectLink(snapshot: snapshot, object: o, showSize: false)
                     if let name = m.fields[k] {
                         Text(name).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
