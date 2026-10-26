@@ -85,6 +85,7 @@ for (int i = 0; i < 10; i++) Waiter.Pending.Add(Jobs.RunBatch());
 for (int i = 0; i < 8; i++) Waiter.Pending.Add(Jobs.ReadAll());
 Waiter.Pending.Add(Task.Run(Jobs.Tick));
 for (int i = 0; i < 3; i++) Jobs.StartPair();
+Jobs.StartRunning();
 // Threads that hold locks: one holds a lock that three others wait for, two wait for each other's locks, and one
 // holds a System.Threading.Lock that another waits for.
 Locks.Start();
@@ -317,6 +318,23 @@ namespace Shop
         }
 
         public static async Task Tick() => await Task.Delay(TimeSpan.FromHours(1));
+
+        public static void StartRunning()
+        {
+            var resume = new TaskCompletionSource();
+            var started = new TaskCompletionSource();
+            Waiter.Pending.Add(RunContinuously(resume.Task, started));
+            // Resume inline on a dedicated thread, independent of the starved thread pool.
+            new Thread(resume.SetResult) { Name = "running task", IsBackground = true }.Start();
+            started.Task.GetAwaiter().GetResult();
+        }
+
+        static async Task RunContinuously(Task resume, TaskCompletionSource started)
+        {
+            await resume;
+            started.SetResult();
+            while (true) Thread.SpinWait(1024);
+        }
 
         public static void StartPair()
         {

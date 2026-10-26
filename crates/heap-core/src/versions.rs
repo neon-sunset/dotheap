@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
 
 const SUPPORTED_MAJOR_MINOR: &str = "10.0";
-const SUPPORTED_PATCHES: RangeInclusive<u32> = 1..=13;
+const SUPPORTED_PATCHES: RangeInclusive<u32> = 0..=14;
 
 fn is_supported(version: &str) -> bool {
     let Some((major_minor, patch)) = version.rsplit_once('.') else {
@@ -127,8 +127,11 @@ pub fn product_version_info(value: &str) -> Option<String> {
     }
     Some(
         version
-            .strip_suffix("-dev")
-            .unwrap_or_else(|| version.split("-servicing.").next().unwrap_or(version))
+            .split_once('-')
+            .filter(|(_, suffix)| {
+                *suffix == "dev" || suffix.starts_with("servicing.") || suffix.starts_with("rtm.")
+            })
+            .map_or(version, |(release, _)| release)
             .into(),
     )
 }
@@ -139,17 +142,16 @@ mod tests {
 
     #[test]
     fn supported_range_includes_every_patch() {
-        for patch in 1..=13 {
+        for patch in 0..=14 {
             assert!(is_supported(&format!("10.0.{patch}")));
         }
-        assert_eq!(supported_range(), "10.0.1–10.0.13");
+        assert_eq!(supported_range(), "10.0.0–10.0.14");
     }
 
     #[test]
     fn unsupported_and_prerelease_versions_are_not_included() {
         for version in [
-            "10.0.0",
-            "10.0.14",
+            "10.0.15",
             "10.0.100",
             "10.1.1",
             "9.0.13",
@@ -159,6 +161,7 @@ mod tests {
             "10.0.13.0",
             "10.0.+13",
             "10.0.013",
+            "10.0.00",
             "10.0.4294967296",
             "10.0.",
             "10.0",
@@ -170,20 +173,31 @@ mod tests {
 
     #[test]
     fn supported_versions_keep_runtime_and_library_normalization() {
-        assert_eq!(
-            product_version_file("10.0.1325.12345"),
-            Some("10.0.13".into())
-        );
+        for (file, product) in [
+            ("10.0.25.52411", "10.0.0"),
+            ("10.0.1325.12345", "10.0.13"),
+            ("10.0.1426.52326", "10.0.14"),
+        ] {
+            assert_eq!(product_version_file(file), Some(product.into()));
+        }
         for version in [
+            "10.0.0+commit",
+            "10.0.0-rtm.25523.111+commit",
             "10.0.13+commit",
             "10.0.13-servicing.123+commit",
+            "10.0.14+commit",
+            "10.0.14-servicing.123+commit",
             "10.0.12-dev",
         ] {
             assert!(is_supported(&product_version_info(version).unwrap()));
         }
-        assert!(!is_supported(
-            &product_version_info("10.0.13-rc.1+commit").unwrap()
-        ));
+        for version in [
+            "10.0.0-rc.2.25462.117+commit",
+            "10.0.13-rc.1+commit",
+            "10.0.14-preview.1+commit",
+        ] {
+            assert!(!is_supported(&product_version_info(version).unwrap()));
+        }
         assert_eq!(product_version_file("42.42.42.42424"), None);
     }
 }

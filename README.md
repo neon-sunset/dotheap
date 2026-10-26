@@ -196,7 +196,7 @@ Use a full dump from `dotheap dump`, `dotnet-dump collect --type Full`, a kernel
 The analysis host can differ from the dump's platform: for example, read a Linux dump on macOS.
 The Windows CLI also reads these formats; Windows minidumps are not supported.
 
-.NET and ASP.NET Core **10.0.1–10.0.13** are supported, including intermediate patch releases.
+.NET and ASP.NET Core **10.0.0–10.0.14** are supported, including intermediate patch releases.
 Versions outside this range open with warnings in the CLI and Viewer. The summary identifies the
 runtime, .NET libraries and ASP.NET Core versions. [versions.rs](crates/heap-core/src/versions.rs)
 defines the range; [Development](docs/development.md#net-version-compatibility) records the source
