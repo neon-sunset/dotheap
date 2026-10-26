@@ -403,7 +403,7 @@ impl HeapSnapshot {
                 .collect(),
         )
     }
-    pub fn static_field_slots(&self) -> Result<Arc<HashMap<u64, String>>> {
+    pub fn static_field_slots(&self) -> Result<Arc<HashMap<u64, type_names::StaticField>>> {
         self.memo("staticFieldSlots", || {
             Ok(self
                 .names
@@ -449,7 +449,15 @@ impl HeapSnapshot {
             return Ok(None);
         };
         if let Some(name) = self.static_field_slots()?.get(&slot) {
-            return Ok(Some(format!("static {name}")));
+            return Ok(Some(format!(
+                "{} {}",
+                if name.thread.is_some() {
+                    "thread static"
+                } else {
+                    "static"
+                },
+                name.label()
+            )));
         }
         fn find(values: &[FieldValue], slot: u64, end: u64) -> Option<String> {
             for (i, v) in values.iter().enumerate() {

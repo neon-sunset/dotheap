@@ -72,6 +72,64 @@ def native_allocations(path):
     path.write_bytes(data)
 
 
+def static_fields(path, mode):
+    contract.core(path, base=24, component=8, length=4, series=((16, 0),),
+                  refs={16: 1, 24: 2, 32: 1, 40: 2}, rooted=True)
+    data = bytearray(path.read_bytes())
+    page, image = contract.PAGE, contract.IMAGE
+
+    def put(address, value, fmt="Q"):
+        offset = 4096 + address - image if image <= address < image + 4096 else 8192 + address - page
+        struct.pack_into("<" + fmt, data, offset, value)
+
+    if mode == "owned":
+        owner, target = contract.FIRST + 136, contract.FIRST + 160
+        root = data.index(struct.pack("<Q", contract.FIRST), 512, 4096)
+        struct.pack_into("<Q", data, root, owner)
+        leaf = page + 0x2200
+        put(leaf, 0x01000000, "I")
+        put(leaf - 8, 1)
+        put(leaf - 16, 8)
+        put(leaf - 24, -16, "q")
+        put(owner + 8, contract.FIRST)
+        for offset in (16, 24, 32, 40):
+            put(contract.FIRST + offset, target)
+
+    types = {
+        "DynamicStaticsInfo": {"!": 24, "GCStatics": 0},
+        "MethodTable": {"AuxiliaryData": 32},
+        "Module": {"TypeDefToMethodTableMap": 64},
+        "ModuleLookupMap": {"Next": 0, "TableData": 8, "Count": 16, "SupportedFlagsMask": 24},
+        "EEClass": {"FieldDescList": 24, "NumStaticFields": 52},
+        "FieldDesc": {"!": 16},
+    }
+    descriptor = json.dumps({"types": types, "globals": {}}).encode()
+    data[4096 + 0x400:4096 + 0x408] = b"DNCCDAC\0"
+    put(image + 0x40c, len(descriptor), "I")
+    put(image + 0x410, image + 0x800)
+    data[4096 + 0x800:4096 + 0x800 + len(descriptor)] = descriptor
+    put(contract.MT, 0x810a0008, "I")
+    put(contract.MT + 24, page + 0x5000)
+    put(contract.MT + 48, page + 0x2200)
+    put(page + 0x5048, page + 0x5100)
+    put(page + 0x5050, 2 if mode == "types" else 1, "I")
+    for i in range(2 if mode == "types" else 1):
+        mt, aux = page + 0x6000 + i * 0x200, page + 0x7000 + i * 0x100
+        put(page + 0x5100 + i * 8, mt)
+        put(mt + 8, 2 | ((i + 1) << 8), "I")
+        put(mt + 24, page + 0x5000)
+        put(mt + 32, aux)
+        put(mt + 40, mt + 0x80)
+        put(mt + 0x98, mt + 0xc0)
+        fields = 4 if mode in ("fields", "owned") else 2
+        put(mt + 0xb4, fields, "H")
+        put(aux - 24, (contract.FIRST + 16 + i * 16) | 1)
+        for field in range(fields):
+            put(mt + 0xc8 + field * 16, (1 << 24) | (field + 1), "I")
+            put(mt + 0xcc + field * 16, (0x12 << 27) | (field * 8), "I")
+    path.write_bytes(data)
+
+
 def generate(folder):
     folder.mkdir(parents=True, exist_ok=True)
     cases = []
@@ -111,6 +169,9 @@ def generate(folder):
     add("empty-reference-array", base=24, component=8, series=((16, 0),))
     add("empty-struct-array", base=24, component=16, series=(), offset=16, runs=((1, 8),))
     (folder / "expected.json").write_text(json.dumps(cases, indent=2) + "\n")
+
+    for mode in ("fields", "types", "unnamed", "owned"):
+        static_fields(folder / f"static-shared-{mode}.dmp", mode)
 
     references = bytearray((folder / "reference-array-rooted.dmp").read_bytes())
     method_table = 8192 + contract.MT - contract.PAGE

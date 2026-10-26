@@ -22,6 +22,20 @@ pub struct FieldInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_type: Option<u64>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StaticField {
+    pub method_table: u64,
+    pub declaring_type: String,
+    pub token: u32,
+    pub name: String,
+    pub thread: Option<i32>,
+}
+impl StaticField {
+    pub fn label(&self) -> String {
+        format!("{}.{}", short(&self.declaring_type), self.name)
+    }
+}
 impl FieldInfo {
     pub fn is_native_pointer(&self) -> bool {
         matches!(self.element_type, 0xf | 0x18 | 0x19 | 0x1b)
@@ -169,7 +183,9 @@ impl TypeNames {
         let count = known.len();
         for (i, mt) in known.clone().into_iter().enumerate() {
             progress.items(i, count);
-            if dump.u32(mt).is_some_and(|f| f & 0x80000 != 0)
+            if dump
+                .u32(mt)
+                .is_some_and(|f| [0x80000, 0xa0000].contains(&(f & 0xf0000)))
                 && let Some(element) = dump
                     .u64(mt.wrapping_add(48))
                     .filter(|&v| v != 0 && v & 1 == 0)
@@ -307,7 +323,7 @@ impl TypeNames {
     pub fn static_field_slots(
         &self,
         descriptor: Option<&ContractDescriptor>,
-    ) -> HashMap<u64, String> {
+    ) -> HashMap<u64, StaticField> {
         self.static_field_slots_with_progress(descriptor, crate::progress::Progress::none())
     }
 
@@ -315,7 +331,7 @@ impl TypeNames {
         &self,
         descriptor: Option<&ContractDescriptor>,
         progress: crate::progress::Progress<'_>,
-    ) -> HashMap<u64, String> {
+    ) -> HashMap<u64, StaticField> {
         self.resolver
             .lock()
             .unwrap()
@@ -566,7 +582,8 @@ impl Resolver {
     }
     fn type_argument_handles(&self, mt: u64) -> Vec<u64> {
         (|| {
-            if self.dump.u32(mt)? & 0x30 == 0 {
+            let flags = self.dump.u32(mt)?;
+            if flags & 0x8000_0000 != 0 || flags & 0x30 == 0 {
                 return None;
             }
             let per_inst = self.dump.u64(mt.checked_add(48)?)?;
@@ -740,70 +757,58 @@ impl Resolver {
         &mut self,
         descriptor: Option<&ContractDescriptor>,
         progress: crate::progress::Progress<'_>,
-    ) -> Option<HashMap<u64, String>> {
+    ) -> Option<HashMap<u64, StaticField>> {
         let d = descriptor?;
-        let (dsi, aux, gc_statics, type_map, static_count) = (
-            d.offset("DynamicStaticsInfo", "!")?,
-            d.offset("MethodTable", "AuxiliaryData")?,
-            d.offset("DynamicStaticsInfo", "GCStatics")?,
-            d.offset("Module", "TypeDefToMethodTableMap")?,
-            d.offset("EEClass", "NumStaticFields")?,
-        );
+        let dsi = d.offset("DynamicStaticsInfo", "!")?;
+        let aux = d.offset("MethodTable", "AuxiliaryData")?;
+        let gc_statics = d.offset("DynamicStaticsInfo", "GCStatics")?;
+        let static_count = d.offset("EEClass", "NumStaticFields")?;
         let mask = d
             .globals
             .get("StaticsPointerMask")
             .copied()
             .unwrap_or(!1u64);
         let mut tables: BTreeSet<_> = self.known.iter().copied().collect();
-        let modules: BTreeSet<_> = self
+        let mut modules: BTreeSet<_> = self
             .known
             .iter()
             .filter_map(|mt| self.dump.u64(mt.wrapping_add(24)))
             .filter(|&m| m != 0)
             .collect();
+        modules.extend(self.loaded_modules(d));
         let count = modules.len();
         for (index, module) in modules.into_iter().enumerate() {
             progress.portion(0.0, 0.25).items(index, count);
-            let Some(mut map) = module.checked_add(type_map) else {
-                continue;
-            };
-            for _ in 0..64 {
-                if map == 0 {
-                    break;
+            self.module_method_tables(module, d, &mut tables);
+        }
+        let mut pending: Vec<_> = tables.iter().copied().collect();
+        while let Some(mt) = pending.pop() {
+            let parent = self.dump.u64(mt.wrapping_add(16)).unwrap_or(0);
+            let mut related = self.type_argument_handles(mt);
+            related.push(parent);
+            if self
+                .dump
+                .u32(mt)
+                .is_some_and(|f| [0x80000, 0xa0000].contains(&(f & 0xf0000)))
+            {
+                related.push(self.dump.u64(mt.wrapping_add(48)).unwrap_or(0));
+            }
+            for mt in related.into_iter().filter(|&mt| mt != 0 && mt & 7 == 0) {
+                if tables.insert(mt) {
+                    pending.push(mt);
                 }
-                let (Some(data), Some(count)) = (
-                    map.checked_add(d.offset("ModuleLookupMap", "TableData").unwrap_or(8))
-                        .and_then(|p| self.dump.u64(p)),
-                    map.checked_add(d.offset("ModuleLookupMap", "Count").unwrap_or(16))
-                        .and_then(|p| self.dump.u32(p)),
-                ) else {
-                    break;
-                };
-                let flags = map
-                    .checked_add(
-                        d.offset("ModuleLookupMap", "SupportedFlagsMask")
-                            .unwrap_or(24),
-                    )
-                    .and_then(|p| self.dump.u64(p))
-                    .unwrap_or(0);
-                if data != 0 && count < 1 << 20 {
-                    for k in 0..count {
-                        if let Some(v) = data
-                            .checked_add(k as u64 * 8)
-                            .and_then(|p| self.dump.u64(p))
-                            .map(|v| v & !flags)
-                            .filter(|&v| v != 0)
-                        {
-                            tables.insert(v);
-                        }
-                    }
-                }
-                map = map
-                    .checked_add(d.offset("ModuleLookupMap", "Next").unwrap_or(0))
-                    .and_then(|p| self.dump.u64(p))
-                    .unwrap_or(0);
             }
         }
+        let threads: Vec<_> = d
+            .threads(&self.dump)
+            .into_iter()
+            .filter_map(|(thread, tid)| {
+                let tld = self
+                    .dump
+                    .u64(thread.checked_add(d.offset("Thread", "ThreadLocalDataPtr")?)?)?;
+                (tld != 0).then_some((tld, tid))
+            })
+            .collect();
         let mut slots = HashMap::new();
         let count = tables.len();
         for (index, mt) in tables.into_iter().enumerate() {
@@ -815,30 +820,52 @@ impl Resolver {
                     return None;
                 }
                 let aux_data = self.dump.u64(mt.checked_add(aux)?)?;
-                let raw = self
+                let base = self
                     .dump
-                    .u64(aux_data.checked_sub(dsi)?.checked_add(gc_statics)?)?;
-                if raw & mask == 0 {
-                    return None;
-                }
+                    .u64(aux_data.checked_sub(dsi)?.checked_add(gc_statics)?)?
+                    & mask;
                 let ee = self.ee_class(mt)?;
-                let list = self.dump.u64(ee.checked_add(24)?)?;
-                let statics = self.dump.u16(ee.checked_add(static_count)?)?;
-                (list != 0 && statics > 0).then_some((raw & mask, list, statics as usize))
+                let statics = self.dump.u16(ee.checked_add(static_count)?)? as usize;
+                let generic = self.dump.u32(mt)? & 0x30 != 0;
+                let (list, first) = if generic {
+                    // GenericsStaticsInfo ends with DynamicStaticsInfo; its field descriptors come first.
+                    (self.dump.u64(aux_data.checked_sub(dsi + 8)?)?, 0)
+                } else {
+                    let parent = self.dump.u64(mt.checked_add(16)?)?;
+                    let inherited = if parent == 0 {
+                        0
+                    } else {
+                        self.field_count(parent)
+                    };
+                    (
+                        self.dump
+                            .u64(ee.checked_add(d.offset("EEClass", "FieldDescList")?)?)?,
+                        self.field_count(mt).saturating_sub(inherited),
+                    )
+                };
+                let tls = d
+                    .offset("EEClass", "NumThreadStaticFields")
+                    .and_then(|off| self.dump.u16(ee.checked_add(off)?))
+                    .filter(|&n| n > 0)
+                    .and_then(|_| {
+                        self.dump.u32(
+                            aux_data
+                                .checked_sub(d.offset("ThreadStaticsInfo", "!")?)?
+                                .checked_add(d.offset("ThreadStaticsInfo", "GCTlsIndex")?)?,
+                        )
+                    });
+                (list != 0 && statics > 0 && (base != 0 || tls.is_some_and(|v| v != u32::MAX)))
+                    .then_some((base, list, first, statics, tls))
             })();
-            let Some((base, list, statics)) = fields else {
+            let Some((base, list, first, statics, tls)) = fields else {
                 continue;
             };
-            let parent = self.dump.u64(mt.wrapping_add(16)).unwrap_or(0);
-            let introduced = self.field_count(mt).saturating_sub(if parent == 0 {
-                0
-            } else {
-                self.field_count(parent)
-            });
-            let name = short(&self.name(mt, 0));
+            let name = self.name(mt, 0);
             let metadata = self.metadata_for(mt).map(|(_, m)| m);
-            for k in introduced..introduced + statics {
-                let Some(fd) = list.checked_add(k as u64 * 16) else {
+            for k in first..first + statics {
+                let Some(fd) =
+                    list.checked_add(k as u64 * d.offset("FieldDesc", "!").unwrap_or(16))
+                else {
                     break;
                 };
                 let (Some(d1), Some(d2)) = (
@@ -848,28 +875,238 @@ impl Resolver {
                     break;
                 };
                 if d1 & (1 << 24) == 0
-                    || d1 & (3 << 25) != 0
+                    || d1 & (1 << 26) != 0
                     || ![0xe, 0x11, 0x12, 0x14, 0x15, 0x1c, 0x1d].contains(&(d2 >> 27))
                 {
                     continue;
                 }
-                let rid = (d1 & 0xff_ffff) as usize;
-                if let Some(slot) = base.checked_add((d2 & 0x7ff_ffff) as u64) {
-                    slots.insert(
-                        slot,
-                        format!(
-                            "{name}.{}",
-                            metadata
-                                .as_ref()
-                                .and_then(|m| m.field_name(rid))
-                                .unwrap_or_else(|| format!("field {rid}"))
-                        ),
-                    );
+                let offset = (d2 & 0x7ff_ffff) as u64;
+                if offset > 0x07ff_fff8 {
+                    continue;
+                }
+                let token = d1 & 0xff_ffff;
+                let field = StaticField {
+                    method_table: mt,
+                    declaring_type: name.clone(),
+                    token,
+                    name: metadata
+                        .as_ref()
+                        .and_then(|m| m.field_name(token as usize))
+                        .unwrap_or_else(|| format!("field {token}")),
+                    thread: None,
+                };
+                if d1 & (1 << 25) != 0 {
+                    if let Some(tls) = tls.filter(|&tls| tls != u32::MAX) {
+                        for &(tld, tid) in &threads {
+                            if let Some(slot) = self
+                                .thread_static_base(tld, tls, d)
+                                .and_then(|base| base.checked_add(offset))
+                            {
+                                slots.insert(
+                                    slot,
+                                    StaticField {
+                                        thread: Some(tid),
+                                        ..field.clone()
+                                    },
+                                );
+                            }
+                        }
+                    }
+                } else if base != 0
+                    && let Some(slot) = base.checked_add(offset)
+                {
+                    slots.insert(slot, field);
                 }
             }
         }
         progress.report(1.0);
         Some(slots)
+    }
+
+    fn loaded_modules(&self, d: &ContractDescriptor) -> Vec<u64> {
+        let read = || {
+            let domain = self.dump.u64(*d.globals.get("AppDomain")?)?;
+            let list = domain.checked_add(d.offset("AppDomain", "AssemblyList")?)?;
+            let mut remaining = self
+                .dump
+                .u32(list.checked_add(d.offset("ArrayListBase", "Count")?)?)?;
+            if remaining > 1 << 20 {
+                return None;
+            }
+            let mut block = list.checked_add(d.offset("ArrayListBase", "FirstBlock")?)?;
+            let mut seen = HashSet::new();
+            let mut modules = Vec::new();
+            while remaining > 0 && block != 0 && seen.insert(block) {
+                let count = self
+                    .dump
+                    .u32(block.checked_add(d.offset("ArrayListBlock", "Size")?)?)?
+                    .min(remaining);
+                let values = block.checked_add(d.offset("ArrayListBlock", "ArrayStart")?)?;
+                for k in 0..count {
+                    if let Some(module) = self
+                        .dump
+                        .u64(values + u64::from(k) * 8)
+                        .filter(|&a| a != 0)
+                        .and_then(|a| {
+                            self.dump
+                                .u64(a.checked_add(d.offset("Assembly", "Module")?)?)
+                        })
+                        .filter(|&m| m != 0)
+                    {
+                        modules.push(module);
+                    }
+                }
+                remaining -= count;
+                block = self
+                    .dump
+                    .u64(block.checked_add(d.offset("ArrayListBlock", "Next")?)?)?;
+            }
+            Some(modules)
+        };
+        read().unwrap_or_default()
+    }
+
+    fn module_method_tables(
+        &self,
+        module: u64,
+        d: &ContractDescriptor,
+        tables: &mut BTreeSet<u64>,
+    ) {
+        let read = || {
+            let mut found = Vec::new();
+            let mut map = module.checked_add(d.offset("Module", "TypeDefToMethodTableMap")?)?;
+            let mut seen = HashSet::new();
+            while map != 0 && seen.insert(map) {
+                let data = self
+                    .dump
+                    .u64(map.checked_add(d.offset("ModuleLookupMap", "TableData")?)?)?;
+                let count = self
+                    .dump
+                    .u32(map.checked_add(d.offset("ModuleLookupMap", "Count")?)?)?;
+                let flags = self
+                    .dump
+                    .u64(map.checked_add(d.offset("ModuleLookupMap", "SupportedFlagsMask")?)?)?;
+                if count > 1 << 20 {
+                    break;
+                }
+                for k in 0..count {
+                    if let Some(mt) = self
+                        .dump
+                        .u64(data + u64::from(k) * 8)
+                        .map(|v| v & !flags)
+                        .filter(|&v| v != 0 && v & 7 == 0)
+                    {
+                        found.push(mt);
+                    }
+                }
+                map = self
+                    .dump
+                    .u64(map.checked_add(d.offset("ModuleLookupMap", "Next")?)?)?;
+            }
+            Some(found)
+        };
+        tables.extend(read().unwrap_or_default());
+        let read =
+            || {
+                let hash = self
+                    .dump
+                    .u64(module.checked_add(d.offset("Module", "AvailableTypeParams")?)?)?;
+                let buckets = self
+                    .dump
+                    .u64(hash.checked_add(d.offset("EETypeHashTable", "Buckets")?)?)?;
+                let count = self.dump.u64(buckets)?;
+                if count > 1 << 20 {
+                    return None;
+                }
+                let mut found = Vec::new();
+                let mut seen = HashSet::new();
+                for k in 0..count {
+                    let mut entry = self.dump.u64(buckets.checked_add((k + 3) * 8)?)?;
+                    while entry != 0 && entry & 1 == 0 && seen.insert(entry) {
+                        if let Some(mt) =
+                            self.dump
+                                .u64(entry.checked_add(
+                                    d.offset("EETypeHashTable", "VolatileEntryValue")?,
+                                )?)
+                                .map(|v| v & !1)
+                                .filter(|&v| v != 0 && v & 7 == 0)
+                        {
+                            found.push(mt);
+                        }
+                        if seen.len() > 1 << 20 {
+                            return Some(found);
+                        }
+                        entry = self.dump.u64(entry.checked_add(
+                            d.offset("EETypeHashTable", "VolatileEntryNextEntry")?,
+                        )?)?;
+                    }
+                }
+                Some(found)
+            };
+        tables.extend(read().unwrap_or_default());
+    }
+
+    fn thread_static_base(&self, tld: u64, index: u32, d: &ContractDescriptor) -> Option<u64> {
+        let offset = u64::from(index & 0xff_ffff);
+        let kind = index >> 24;
+        let base = (|| match kind {
+            0 | 1 => {
+                let (count, array) = if kind == 0 {
+                    ("NonCollectibleTlsDataCount", "NonCollectibleTlsArrayData")
+                } else {
+                    ("CollectibleTlsDataCount", "CollectibleTlsArrayData")
+                };
+                if offset
+                    >= u64::from(
+                        self.dump
+                            .u32(tld.checked_add(d.offset("ThreadLocalData", count)?)?)?,
+                    )
+                {
+                    return None;
+                }
+                let array = self
+                    .dump
+                    .u64(tld.checked_add(d.offset("ThreadLocalData", array)?)?)?;
+                if array == 0 {
+                    return None;
+                }
+                let value = self.dump.u64(array.checked_add(offset * 8)?)?;
+                if kind == 0 {
+                    Some(value)
+                } else {
+                    self.dump.u64(value)
+                }
+            }
+            2 => tld.checked_add(offset),
+            _ => None,
+        })()
+        .filter(|&v| v != 0);
+        if base.is_some() {
+            return base;
+        }
+        let mut entry = self
+            .dump
+            .u64(tld.checked_add(d.offset("ThreadLocalData", "InFlightData")?)?)?;
+        let mut seen = HashSet::new();
+        while entry != 0 && seen.insert(entry) && seen.len() < 1 << 20 {
+            if self
+                .dump
+                .u32(entry.checked_add(d.offset("InFlightTLSData", "TlsIndex")?)?)?
+                == index
+            {
+                return self
+                    .dump
+                    .u64(
+                        self.dump
+                            .u64(entry.checked_add(d.offset("InFlightTLSData", "TLSData")?)?)?,
+                    )
+                    .filter(|&v| v != 0);
+            }
+            entry = self
+                .dump
+                .u64(entry.checked_add(d.offset("InFlightTLSData", "Next")?)?)?;
+        }
+        None
     }
     fn pdb(&mut self, name: &str, metadata: &AssemblyMetadata) -> Option<Arc<PortablePdb>> {
         if let Some(pdb) = self.pdbs.get(name) {

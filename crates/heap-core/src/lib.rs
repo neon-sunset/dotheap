@@ -38,6 +38,7 @@ pub mod runtime;
 mod satori_heap;
 pub mod search;
 pub mod smaps;
+pub mod static_ownership;
 pub mod symbol_server;
 pub mod symbols;
 pub mod tasks;

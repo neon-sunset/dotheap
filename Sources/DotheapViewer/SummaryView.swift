@@ -45,6 +45,7 @@ final class MemoryNode: Identifiable {
 /// Builds the memory tree of a snapshot: the process at the top, then the Satori heap and native memory.
 enum MemoryTree {
     static func root(_ s: HeapSnapshot) throws -> MemoryNode {
+        _ = try s.ownerTree(managedOnly: true)
         let (parts, resident) = try s.memo("process memory") { try s.processMemory() }
         let total = parts.reduce(0) { $0 + $1.bytes }
         let detail = resident ? "resident memory (RSS) per smaps, by kind of memory in the dump"
@@ -109,26 +110,45 @@ enum MemoryTree {
     }
 
     static func dominated(_ s: HeapSnapshot, node: Int, path: String, keep: (Int) -> Bool = { _ in true }) throws -> [MemoryNode] {
-        let graph = s.graph
-        return try s.dominatedGroups(of: node).filter { keep($0.nodes[0]) }.map { g in
-            if g.nodes.count == 1 { return try objectNode(s, g.nodes[0], path: path) }
-            return MemoryNode(id: path + "/" + g.name, name: "\(g.nodes.count.formatted()) × \(TypeNames.short(g.name))", detail: "retained together", bytes: g.retained,
-                              color: Palette.hashed(g.name)) {
-                try g.nodes.map { try objectNode(s, $0, path: path + "/" + g.name) }
-            }
+        let tree = try s.ownerTree(managedOnly: true)
+        return try tree.groups(of: node).filter { keep($0.nodes[0]) }.map { g in
+            try attributedGroup(s, tree: tree, group: g, path: path, managedOnly: true)
         }
-        .filter { _ in graph.liveBytes > 0 }
     }
 
-    static func objectNode(_ s: HeapSnapshot, _ node: Int, path: String) throws -> MemoryNode {
-        let graph = s.graph
-        let isObject = node < s.heap.count
-        var name = isObject ? (s.staticsArrays.contains(node) ? "static fields" : TypeNames.short(s.typeName(ofObject: node))) : s.nodeName(node)
-        if isObject, let label = try s.identifyingText(ofObject: node) { name = "\"\(label)\"  " + name }
-        let hasChildren = !graph.dominatedChildrenUnsorted(of: node).isEmpty
-        return MemoryNode(id: path + "/\(node)", name: name, detail: isObject ? Format.hex(s.heap.addresses[node]) + ", object itself " + Format.bytes(s.heap.size(node)) : "root source",
-                          bytes: graph.retained[node], color: Palette.hashed(isObject ? s.typeName(ofObject: node) : "root"), object: isObject ? node : nil,
-                          children: hasChildren ? { try dominated(s, node: node, path: path + "/\(node)") } : nil)
+    static func attributedGroup(_ s: HeapSnapshot, tree: OwnerTree, group g: HeapSnapshot.OwnershipGroup, path: String, managedOnly: Bool) throws -> MemoryNode {
+        if g.nodes.count == 1 { return try attributedNode(s, tree: tree, node: g.nodes[0], path: path, managedOnly: managedOnly) }
+        let first = try tree.entry(g.nodes[0])
+        return MemoryNode(id: path + "/group/\(g.nodes[0])", name: "\(g.nodes.count.formatted()) × \(TypeNames.short(g.name))",
+                          detail: managedOnly ? "retained together" : "\(Format.mb(g.managed)) managed, \(Format.mb(g.native)) native",
+                          bytes: managedOnly ? g.managed : g.total, color: try ownerColor(s, first, managedOnly: managedOnly)) {
+            try g.nodes.map { try attributedNode(s, tree: tree, node: $0, path: path + "/group/\(g.nodes[0])", managedOnly: managedOnly) }
+        }
+    }
+
+    static func attributedNode(_ s: HeapSnapshot, tree: OwnerTree, node: Int, path: String, managedOnly: Bool, suffix: String = "") throws -> MemoryNode {
+        let entry = try tree.entry(node)
+        var name = TypeNames.short(entry.name) + suffix
+        var detail = managedOnly ? "retained managed memory" : "\(Format.mb(entry.managed)) managed, \(Format.mb(entry.native)) native"
+        if let object = entry.object {
+            if let label = try s.identifyingText(ofObject: object) { name = "\"\(label)\"  " + name }
+            detail = Format.hex(s.heap.addresses[object]) + ", " + (managedOnly ? "object itself " + Format.bytes(entry.size) : detail)
+        } else if let chunk = entry.chunk {
+            detail = try Format.hex(s.nativeGraph.chunks[chunk].userStart) + ", " + detail
+        } else if entry.kind == .type { detail = "declaring type; " + detail }
+        let hasChildren = !tree.children(of: node).isEmpty
+        return MemoryNode(id: path + "/\(node)", name: name, detail: detail,
+                          bytes: managedOnly ? entry.managed : entry.managed + entry.native,
+                          color: try ownerColor(s, entry, managedOnly: managedOnly), object: entry.object,
+                          children: hasChildren ? {
+            try tree.groups(of: node).map { try attributedGroup(s, tree: tree, group: $0, path: path + "/\(node)", managedOnly: managedOnly) }
+        } : nil)
+    }
+
+    static func ownerColor(_ s: HeapSnapshot, _ entry: OwnerEntry, managedOnly: Bool) throws -> Color {
+        if let chunk = entry.chunk { return try Palette.native("malloc heap").opacity(s.nativeGraph.className(chunk) == nil ? 0.7 : 1) }
+        if entry.kind == .source { return managedOnly ? Palette.hashed("root") : Palette.native("native libraries") }
+        return Palette.hashed(entry.name)
     }
 
     /// Dead objects by the type of the unreferenced dead object that holds them.
@@ -230,6 +250,7 @@ enum MemoryTree {
 extension MemoryTree {
     /// Live managed objects and malloc chunks in use under what keeps them alive alone (the ownership graph).
     static func owners(_ s: HeapSnapshot) throws -> MemoryNode {
+        _ = try s.ownerTree()
         let o = try s.ownership, root = o.rootNode
         return MemoryNode(id: "owners", name: "Live memory by owner",
                           detail: "\(Format.mb(o.retainedManaged[root])) managed, \(Format.mb(o.retainedNative[root])) native; each block is what an object, chunk or root keeps alive alone",
@@ -237,37 +258,18 @@ extension MemoryTree {
     }
 
     static func ownerGroups(_ s: HeapSnapshot, node: Int, path: String) throws -> [MemoryNode] {
-        try s.ownershipGroups(of: node).map { g in
-            if g.nodes.count == 1 { return try ownerNode(s, g.nodes[0], path: path) }
-            return MemoryNode(id: path + "/" + g.name, name: "\(g.nodes.count.formatted()) × \(TypeNames.short(g.name))",
-                              detail: "\(Format.mb(g.managed)) managed, \(Format.mb(g.native)) native", bytes: g.total, color: try ownerColor(s, g.nodes[0])) {
-                try g.nodes.map { try ownerNode(s, $0, path: path + "/" + g.name) }
+        let tree = try s.ownerTree()
+        return try tree.groups(of: node).flatMap { g -> [MemoryNode] in
+            if g.nodes.count == 1 {
+                let entry = try tree.entry(g.nodes[0])
+                if entry.kind == .staticFields || entry.kind == .threadStatics {
+                    return try tree.children(of: entry.id).map {
+                        try attributedNode(s, tree: tree, node: $0, path: path, managedOnly: false,
+                                           suffix: entry.kind == .threadStatics ? " (thread statics)" : "")
+                    }
+                }
             }
-        }
-    }
-
-    static func ownerNode(_ s: HeapSnapshot, _ v: Int, path: String) throws -> MemoryNode {
-        let o = try s.ownership
-        var name = try TypeNames.short(s.ownershipName(v)), object: Int?, address = ""
-        switch o.node(v) {
-        case let .object(i):
-            object = i
-            address = Format.hex(s.heap.addresses[i]) + ", "
-            if let label = try s.identifyingText(ofObject: i) { name = "\"\(label)\"  " + name }
-        case let .chunk(c): address = try Format.hex(s.nativeGraph.chunks[c].userStart) + ", "
-        default: break
-        }
-        let hasChildren = !o.children(of: v).isEmpty
-        return MemoryNode(id: path + "/\(v)", name: name, detail: address + "\(Format.mb(o.retainedManaged[v])) managed, \(Format.mb(o.retainedNative[v])) native",
-                          bytes: o.retained(v), color: try ownerColor(s, v), object: object,
-                          children: hasChildren ? { try ownerGroups(s, node: v, path: path + "/\(v)") } : nil)
-    }
-
-    static func ownerColor(_ s: HeapSnapshot, _ v: Int) throws -> Color {
-        switch try s.ownership.node(v) {
-        case let .object(i): Palette.hashed(s.typeName(ofObject: i))
-        case let .chunk(c): try Palette.native("malloc heap").opacity(s.nativeGraph.className(c) == nil ? 0.7 : 1)
-        default: Palette.native("native libraries")
+            return [try attributedGroup(s, tree: tree, group: g, path: path, managedOnly: false)]
         }
     }
 

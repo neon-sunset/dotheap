@@ -8,6 +8,7 @@ use heap_core::{
     garbage::GarbageGraph,
     native_graph::{ChunkAttribution, ChunkSizeGroup, NativeGraph},
     ownership::{OwnershipGraph, OwnershipRoot},
+    static_ownership::{OwnerEntry, OwnerTree, StaticReference},
     thread_stacks::ThreadStacks,
 };
 use std::sync::Arc;
@@ -41,6 +42,11 @@ pub struct NativeGraphView {
 
 pub struct OwnershipView {
     graph: Arc<OwnershipGraph>,
+}
+
+pub struct OwnerTreeView {
+    snapshot: Arc<HeapSnapshot>,
+    tree: Arc<OwnerTree>,
 }
 
 #[repr(C)]
@@ -78,6 +84,21 @@ pub struct ThreadStacksView {
 }
 
 impl Snapshot {
+    pub fn storage_owner_tree(&self, object: Index) -> Result<Arc<OwnerTreeView>> {
+        self.validate_object(object)?;
+        let tree = self.checked(self.core.storage_owner_tree(object))?;
+        Ok(Arc::new(OwnerTreeView {
+            snapshot: self.core.clone(),
+            tree,
+        }))
+    }
+    pub fn owner_tree(&self, managed_only: bool) -> Result<Arc<OwnerTreeView>> {
+        let tree = self.checked(self.core.owner_tree(managed_only))?;
+        Ok(Arc::new(OwnerTreeView {
+            snapshot: self.core.clone(),
+            tree,
+        }))
+    }
     pub fn native_graph(&self) -> Result<Arc<NativeGraphView>> {
         let graph = self.checked(self.core.native_graph())?;
         Ok(Arc::new(NativeGraphView {
@@ -99,6 +120,41 @@ impl Snapshot {
     pub fn thread_stacks(&self) -> Result<Arc<ThreadStacksView>> {
         let stacks = self.checked(self.core.thread_stacks())?;
         Ok(Arc::new(ThreadStacksView { stacks }))
+    }
+}
+
+impl OwnerTreeView {
+    pub fn root(&self) -> Index {
+        self.tree.root
+    }
+
+    pub fn entry(&self, node: Index) -> Result<Option<OwnerEntry>> {
+        Ok(self.tree.entry(&self.snapshot, node)?)
+    }
+
+    pub fn children(&self, node: Index) -> Vec<Index> {
+        self.tree.children(&self.snapshot, node)
+    }
+
+    pub fn groups(&self, node: Index) -> Result<Vec<OwnershipGroup>> {
+        Ok(self.tree.groups(&self.snapshot, node)?)
+    }
+
+    pub fn roots(&self) -> Result<Vec<OwnerEntry>> {
+        self.tree
+            .roots
+            .iter()
+            .map(|&node| {
+                self.tree
+                    .entry(&self.snapshot, node)
+                    .map(|e| e.expect("root entry"))
+            })
+            .collect::<heap_core::Result<_>>()
+            .map_err(Into::into)
+    }
+
+    pub fn storage_fields(&self, object: Index) -> &[StaticReference] {
+        self.tree.storage_fields(object)
     }
 }
 

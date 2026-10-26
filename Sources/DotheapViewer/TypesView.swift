@@ -75,6 +75,7 @@ struct TypeDetailView: View {
     let graph: OwnershipGraph
     let typeId: UInt32
     let retained: UInt64
+    @State private var owners: OwnerTree?
     @State private var instances: RustArray<Int> = RustArray()
     @State private var referrers: RustArray<HeapSnapshot.TypeGroup> = RustArray()
     @State private var dominators: RustArray<HeapSnapshot.OwnershipTypeGroup> = RustArray()
@@ -88,12 +89,13 @@ struct TypeDetailView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Largest instances").font(.subheadline.weight(.semibold)).padding(.top, 4)
                 List(instances, id: \.self) { i in
-                    HStack {
-                        ObjectLink(snapshot: snapshot, object: i, showSize: false, showType: false)
-                        Spacer()
-                        Text(Format.bytes(snapshot.heap.size(i))).monospacedDigit()
-                        Text(Format.bytes(graph.retained(graph.objectNode(i)))).monospacedDigit().foregroundStyle(.secondary).frame(width: 80, alignment: .trailing)
-                    }
+                    if let owners, !owners.storageFields(of: i).isEmpty {
+                        DisclosureGroup {
+                            StaticStorageView(snapshot: snapshot, object: i)
+                        } label: {
+                            instanceRow(i, role: owners.storageFields(of: i).allSatisfy { $0.thread != nil } ? "Thread statics" : "Static fields")
+                        }
+                    } else { instanceRow(i) }
                 }
             }
             .padding(PageInsets.detail)
@@ -122,13 +124,23 @@ struct TypeDetailView: View {
             do {
                 let result = try await Task.detached {
                     try s.memo("type detail with native retention \(t)") {
-                        (try s.ownershipInstances(ofType: t, limit: 500), try s.referrerTypes(ofType: t), try s.ownershipDominatorTypes(ofType: t))
+                        (try s.ownershipInstances(ofType: t, limit: 500), try s.referrerTypes(ofType: t), try s.ownershipDominatorTypes(ofType: t), try s.ownerTree())
                     }
                 }.value
-                instances = result.0; referrers = result.1; dominators = result.2
+                instances = result.0; referrers = result.1; dominators = result.2; owners = result.3
             } catch {
                 session.error = analysisErrorMessage(error)
             }
+        }
+    }
+
+    private func instanceRow(_ object: Int, role: String? = nil) -> some View {
+        HStack {
+            ObjectLink(snapshot: snapshot, object: object, showSize: false, showType: false)
+            if let role { Text(role).font(.caption).foregroundStyle(.secondary) }
+            Spacer()
+            Text(Format.bytes(snapshot.heap.size(object))).monospacedDigit()
+            Text(Format.bytes(graph.retained(graph.objectNode(object)))).monospacedDigit().foregroundStyle(.secondary).frame(width: 80, alignment: .trailing)
         }
     }
 }
@@ -173,6 +185,53 @@ private struct TypeGroupLabel: View {
             }
             Text("\(objects.formatted()) objects").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             Text(Format.bytes(bytes)).monospacedDigit().frame(width: 80, alignment: .trailing).help(valueLabel)
+        }
+    }
+}
+
+struct StaticStorageView: View {
+    @Environment(Session.self) private var session
+    @Environment(\.typeNameStyle) private var typeNameStyle
+    let snapshot: HeapSnapshot
+    let object: Int
+
+    struct Row: Identifiable {
+        let entry: OwnerEntry
+        let children: [Row]?
+        var id: Int { entry.id }
+    }
+
+    var body: some View {
+        let object = object
+        Computed(snapshot, key: "static storage \(object)", label: "Reading static fields", compute: { s in
+            let tree = try s.storageOwnerTree(object)
+            func rows(_ node: Int) throws -> [Row] {
+                try tree.children(of: node).map { id in
+                    let entry = try tree.entry(id)
+                    let children = entry.object == nil && entry.chunk == nil ? try rows(id) : []
+                    return Row(entry: entry, children: children.isEmpty ? nil : children)
+                }
+            }
+            return try rows(s.ownership.objectNode(object))
+        }) { rows in
+            OutlineGroup(rows, children: \.children) { row in
+                let entry = row.entry
+                HStack(alignment: .firstTextBaseline) {
+                    if let object = entry.object { ObjectLink(snapshot: snapshot, object: object, showSize: false) }
+                    else if let chunk = entry.chunk { NativeLink(snapshot: snapshot, chunk: chunk, name: entry.name, showSize: false) }
+                    else {
+                        if entry.kind == .type { TypeNameText(name: entry.name, style: typeNameStyle, singleLine: true) }
+                        else { Text(entry.name).lineLimit(1).truncationMode(entry.kind == .thread ? .tail : .middle).help(entry.name) }
+                        if entry.targets.count == 1 {
+                            Button { session.select(object: entry.targets[0]) } label: { Image(systemName: "arrow.up.right.square") }
+                                .buttonStyle(.borderless).help("Inspect field value")
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    Text(Format.bytes(entry.managed + entry.native)).monospacedDigit().foregroundStyle(.secondary)
+                        .help("Retained within this storage array; shared allocations appear under their common owner")
+                }
+            }
         }
     }
 }

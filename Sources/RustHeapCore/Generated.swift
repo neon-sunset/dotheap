@@ -1350,6 +1350,65 @@ public struct OpenFile: @unchecked Sendable, Equatable {
     }
 }
 
+func read_OwnerKind(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> OwnerKind { OwnerKind.read(pointer, owner) }
+
+public struct OwnerEntry: @unchecked Sendable, Equatable {
+    let _pointer: UnsafeRawPointer
+    let _owner: RustOwner
+    init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var id: Int { withExtendedLifetime(_owner) { Int(dh_OwnerEntry_id(_pointer)) } }
+    public var kind: OwnerKind { withExtendedLifetime(_owner) { read_OwnerKind(dh_OwnerEntry_kind(_pointer)!, _owner) } }
+    public var name: String { withExtendedLifetime(_owner) { read_String(dh_OwnerEntry_name(_pointer)!, _owner) } }
+    public var object: Int? { withExtendedLifetime(_owner) { read_Option_usize(dh_OwnerEntry_object(_pointer)!, _owner) } }
+    public var chunk: Int? { withExtendedLifetime(_owner) { read_Option_usize(dh_OwnerEntry_chunk(_pointer)!, _owner) } }
+    public var targets: RustArray<Int> { withExtendedLifetime(_owner) { read_Vec_usize(dh_OwnerEntry_targets(_pointer)!, _owner) } }
+    public var threadStatic: Bool { withExtendedLifetime(_owner) { dh_OwnerEntry_thread_static(_pointer) } }
+    public var size: UInt64 { withExtendedLifetime(_owner) { dh_OwnerEntry_size(_pointer) } }
+    public var managed: UInt64 { withExtendedLifetime(_owner) { dh_OwnerEntry_managed(_pointer) } }
+    public var native: UInt64 { withExtendedLifetime(_owner) { dh_OwnerEntry_native(_pointer) } }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        if lhs._pointer == rhs._pointer { return true }
+        return lhs.id == rhs.id &&
+            lhs.kind == rhs.kind &&
+            lhs.name == rhs.name &&
+            lhs.object == rhs.object &&
+            lhs.chunk == rhs.chunk &&
+            lhs.targets == rhs.targets &&
+            lhs.threadStatic == rhs.threadStatic &&
+            lhs.size == rhs.size &&
+            lhs.managed == rhs.managed &&
+            lhs.native == rhs.native
+    }
+}
+
+public enum OwnerKind: Sendable, Hashable {
+    case root
+    case source
+    case object
+    case chunk
+    case staticFields
+    case threadStatics
+    case type
+    case field
+    case thread
+    case storage
+    static func read(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Self {
+        switch dh_tag_OwnerKind(pointer) {
+        case 0: return .root
+        case 1: return .source
+        case 2: return .object
+        case 3: return .chunk
+        case 4: return .staticFields
+        case 5: return .threadStatics
+        case 6: return .type
+        case 7: return .field
+        case 8: return .thread
+        case 9: return .storage
+        default: preconditionFailure("Invalid Rust OwnerKind")
+        }
+    }
+}
+
 func read_OwnershipNode(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> OwnershipNode { OwnershipNode.read(pointer, owner) }
 
 public struct OwnershipEntry: @unchecked Sendable, Equatable {
@@ -2156,6 +2215,27 @@ public struct StateMachineField: @unchecked Sendable, Equatable {
     }
 }
 
+public struct StaticReference: @unchecked Sendable, Equatable {
+    let _pointer: UnsafeRawPointer
+    let _owner: RustOwner
+    init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var slot: UInt64 { withExtendedLifetime(_owner) { dh_StaticReference_slot(_pointer) } }
+    public var declaringType: String { withExtendedLifetime(_owner) { read_String(dh_StaticReference_declaring_type(_pointer)!, _owner) } }
+    public var field: String { withExtendedLifetime(_owner) { read_String(dh_StaticReference_field(_pointer)!, _owner) } }
+    public var thread: Int32? { withExtendedLifetime(_owner) { read_Option_i32(dh_StaticReference_thread(_pointer)!, _owner) } }
+    public var target: Int { withExtendedLifetime(_owner) { Int(dh_StaticReference_target(_pointer)) } }
+    public var owner: Int { withExtendedLifetime(_owner) { Int(dh_StaticReference_owner(_pointer)) } }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        if lhs._pointer == rhs._pointer { return true }
+        return lhs.slot == rhs.slot &&
+            lhs.declaringType == rhs.declaringType &&
+            lhs.field == rhs.field &&
+            lhs.thread == rhs.thread &&
+            lhs.target == rhs.target &&
+            lhs.owner == rhs.owner
+    }
+}
+
 public struct StructElement: @unchecked Sendable, Equatable {
     let _pointer: UnsafeRawPointer
     let _owner: RustOwner
@@ -2842,6 +2922,14 @@ func read_SmapsMapping(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Smaps
 func read_Vec_SmapsMapping(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RustArray<SmapsMapping> { RustArray(dh_read_Vec_SmapsMapping(pointer), owner: owner, read: read_SmapsMapping) }
 
 func read_Option_Vec_SmapsMapping(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RustArray<SmapsMapping>? { dh_read_Option_Vec_SmapsMapping(pointer).map { read_Vec_SmapsMapping($0, owner) } }
+
+func read_OwnerEntry(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> OwnerEntry { OwnerEntry(pointer: pointer, owner: owner) }
+
+func read_Option_OwnerEntry(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> OwnerEntry? { dh_read_Option_OwnerEntry(pointer).map { read_OwnerEntry($0, owner) } }
+
+func read_Vec_OwnerEntry(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RustArray<OwnerEntry> { RustArray(dh_read_Vec_OwnerEntry(pointer), owner: owner, read: read_OwnerEntry) }
+
+func read_StaticReference(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> StaticReference { StaticReference(pointer: pointer, owner: owner) }
 
 func read_NativeInfo(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> NativeInfo { NativeInfo(pointer: pointer, owner: owner) }
 
@@ -3617,6 +3705,18 @@ public final class Snapshot: @unchecked Sendable {
             return read_Option_Vec_SmapsMapping(value!, owner)
         }
     }
+    public func storageOwnerTree(object: Int) throws -> OwnerTreeView {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_Snapshot_storage_owner_tree(pointer, UInt(object)))
+            return withExtendedLifetime(result) { OwnerTreeView(owner: result) }
+        }
+    }
+    public func ownerTree(managedOnly: Bool) throws -> OwnerTreeView {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_Snapshot_owner_tree(pointer, managedOnly))
+            return withExtendedLifetime(result) { OwnerTreeView(owner: result) }
+        }
+    }
     public func nativeGraph() throws -> NativeGraphView {
         return try withExtendedLifetime((owner)) {
             let result = try take(dh_Snapshot_native_graph(pointer))
@@ -3865,6 +3965,47 @@ public final class OwnershipView: @unchecked Sendable {
         return withExtendedLifetime((owner)) {
             let value = dh_OwnershipView_children_starts(pointer)
             return RustArray(value, owner: owner, read: read_u64)
+        }
+    }
+}
+
+public final class OwnerTreeView: @unchecked Sendable {
+    let owner: RustOwner
+    var pointer: UnsafeRawPointer { owner.pointer }
+    init(owner: RustOwner) { self.owner = owner }
+    public func root() -> Int {
+        return withExtendedLifetime((owner)) {
+            return Int(dh_OwnerTreeView_root(pointer))
+        }
+    }
+    public func entry(node: Int) throws -> OwnerEntry? {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_OwnerTreeView_entry(pointer, UInt(node)))
+            return withExtendedLifetime(result) { read_Option_OwnerEntry(result.pointer, result) }
+        }
+    }
+    public func children(node: Int) -> RustArray<Int> {
+        return withExtendedLifetime((owner)) {
+            let result = checked(dh_OwnerTreeView_children(pointer, UInt(node)))
+            return withExtendedLifetime(result) { read_Vec_usize(result.pointer, result) }
+        }
+    }
+    public func groups(node: Int) throws -> RustArray<OwnershipGroup> {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_OwnerTreeView_groups(pointer, UInt(node)))
+            return withExtendedLifetime(result) { read_Vec_OwnershipGroup(result.pointer, result) }
+        }
+    }
+    public func roots() throws -> RustArray<OwnerEntry> {
+        return try withExtendedLifetime((owner)) {
+            let result = try take(dh_OwnerTreeView_roots(pointer))
+            return withExtendedLifetime(result) { read_Vec_OwnerEntry(result.pointer, result) }
+        }
+    }
+    public func storageFields(object: Int) -> RustArray<StaticReference> {
+        return withExtendedLifetime((owner)) {
+            let value = dh_OwnerTreeView_storage_fields(pointer, UInt(object))
+            return RustArray(value, owner: owner, read: read_StaticReference)
         }
     }
 }

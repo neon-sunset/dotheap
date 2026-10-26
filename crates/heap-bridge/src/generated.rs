@@ -1669,6 +1669,74 @@ pub unsafe extern "C" fn dh_OpenFile_owner_object(pointer: *const c_void) -> *co
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_id(pointer: *const c_void) -> usize {
+    unsafe { (*pointer.cast::<OwnerEntry>()).id }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_kind(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnerEntry>()).kind as *const OwnerKind).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_name(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnerEntry>()).name as *const String).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_object(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnerEntry>()).object as *const Option<usize>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_chunk(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnerEntry>()).chunk as *const Option<usize>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_targets(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<OwnerEntry>()).targets as *const Vec<usize>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_thread_static(pointer: *const c_void) -> bool {
+    unsafe { (*pointer.cast::<OwnerEntry>()).thread_static }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_size(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<OwnerEntry>()).size }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_managed(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<OwnerEntry>()).managed }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerEntry_native(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<OwnerEntry>()).native }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_tag_OwnerKind(pointer: *const c_void) -> u32 {
+    unsafe {
+        match &*pointer.cast::<OwnerKind>() {
+            OwnerKind::Root => 0,
+            OwnerKind::Source => 1,
+            OwnerKind::Object => 2,
+            OwnerKind::Chunk => 3,
+            OwnerKind::StaticFields => 4,
+            OwnerKind::ThreadStatics => 5,
+            OwnerKind::Type => 6,
+            OwnerKind::Field => 7,
+            OwnerKind::Thread => 8,
+            OwnerKind::Storage => 9,
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_OwnershipEntry_node(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<OwnershipEntry>()).node as *const OwnershipNode).cast() }
 }
@@ -2968,6 +3036,38 @@ pub unsafe extern "C" fn dh_StateMachineField_value(pointer: *const c_void) -> *
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_StateMachineField_retained_by(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<StateMachineField>()).retained_by as *const Vec<usize>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_StaticReference_slot(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<StaticReference>()).slot }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_StaticReference_declaring_type(
+    pointer: *const c_void,
+) -> *const c_void {
+    unsafe { (&(*pointer.cast::<StaticReference>()).declaring_type as *const String).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_StaticReference_field(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<StaticReference>()).field as *const String).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_StaticReference_thread(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<StaticReference>()).thread as *const Option<i32>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_StaticReference_target(pointer: *const c_void) -> usize {
+    unsafe { (*pointer.cast::<StaticReference>()).target }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_StaticReference_owner(pointer: *const c_void) -> usize {
+    unsafe { (*pointer.cast::<StaticReference>()).owner }
 }
 
 #[unsafe(no_mangle)]
@@ -4740,6 +4840,34 @@ pub unsafe extern "C" fn dh_read_Vec_SmapsMapping(pointer: *const c_void) -> Sli
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_Snapshot_storage_owner_tree(
+    pointer: *const c_void,
+    object: usize,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::arc(
+                (&*pointer.cast::<Snapshot>()).storage_owner_tree(object)?,
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_Snapshot_owner_tree(
+    pointer: *const c_void,
+    managed_only: bool,
+) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::arc(
+                (&*pointer.cast::<Snapshot>()).owner_tree(managed_only)?,
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_Snapshot_native_graph(pointer: *const c_void) -> Outcome {
     unsafe { ffi::call(|| Ok(Owned::arc((&*pointer.cast::<Snapshot>()).native_graph()?))) }
 }
@@ -4757,6 +4885,65 @@ pub unsafe extern "C" fn dh_Snapshot_garbage(pointer: *const c_void) -> Outcome 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_Snapshot_thread_stacks(pointer: *const c_void) -> Outcome {
     unsafe { ffi::call(|| Ok(Owned::arc((&*pointer.cast::<Snapshot>()).thread_stacks()?))) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerTreeView_root(pointer: *const c_void) -> usize {
+    unsafe { (&*pointer.cast::<OwnerTreeView>()).root() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerTreeView_entry(pointer: *const c_void, node: usize) -> Outcome {
+    unsafe { ffi::call(|| Ok(Owned::new((&*pointer.cast::<OwnerTreeView>()).entry(node)?))) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Option_OwnerEntry(pointer: *const c_void) -> *const c_void {
+    unsafe {
+        (&*pointer.cast::<Option<OwnerEntry>>())
+            .as_ref()
+            .map_or(std::ptr::null(), |v| (v as *const OwnerEntry).cast())
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerTreeView_children(pointer: *const c_void, node: usize) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(
+                (&*pointer.cast::<OwnerTreeView>()).children(node),
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerTreeView_groups(pointer: *const c_void, node: usize) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(
+                (&*pointer.cast::<OwnerTreeView>()).groups(node)?,
+            ))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerTreeView_roots(pointer: *const c_void) -> Outcome {
+    unsafe { ffi::call(|| Ok(Owned::new((&*pointer.cast::<OwnerTreeView>()).roots()?))) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Vec_OwnerEntry(pointer: *const c_void) -> Slice {
+    unsafe { Slice::new(&*pointer.cast::<Vec<OwnerEntry>>()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerTreeView_storage_fields(
+    pointer: *const c_void,
+    object: usize,
+) -> Slice {
+    unsafe { Slice::new((&*pointer.cast::<OwnerTreeView>()).storage_fields(object)) }
 }
 
 #[unsafe(no_mangle)]
