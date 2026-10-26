@@ -67,9 +67,9 @@ Recordings contain data from the dump and must be kept private.
 
 ## .NET version compatibility
 
-The supported 10.0.1–10.0.13 range was checked against the corresponding release tags in
-[dotnet/runtime](https://github.com/dotnet/runtime/compare/v10.0.1...v10.0.13) and
-[dotnet/aspnetcore](https://github.com/dotnet/aspnetcore/compare/v10.0.1...v10.0.13).
+The 10.0.0–10.0.13 releases were checked against the corresponding release tags in
+[dotnet/runtime](https://github.com/dotnet/runtime/compare/v10.0.0...v10.0.13) and
+[dotnet/aspnetcore](https://github.com/dotnet/aspnetcore/compare/v10.0.0...v10.0.13).
 The comparison covered 60 source files at every tag:
 
 - Kestrel's request-state and HTTP-method enums are unchanged. The fields used for request and
@@ -82,10 +82,19 @@ The comparison covered 60 source files at every tag:
   reads. Managed field offsets come from the dump, so adding or moving a field does not require
   a fixed-offset update in Dotheap.
 
-Real-dump tests cover .NET 10.0.1, 10.0.9, 10.0.12 and 10.0.13, and ASP.NET Core 10.0.1, 10.0.12
-and 10.0.13. Before extending the range, compare the affected source layouts, field names and
-enum values, and test a dump from the new release. Keep warnings for releases outside the checked
-range, previews and release candidates. Satori layout detection remains structural.
+.NET 10.0.0 uses a `10.0.0-rtm.…` informational version for CoreLib. This is a release build;
+Dotheap normalizes the RTM suffix, as it does servicing-build suffixes. Preview and RC suffixes
+remain unsupported.
+
+The public 10.0.14 source tags still pointed to 10.0.13 when support was added. Checks used the
+released macOS arm64 binaries: `SocketAsyncEventArgs` fields match 10.0.0, and captured heaps
+preserve retained objects, strong GC handles, active Kestrel requests, HttpClient requests and
+pending socket receives. The same dump checks pass on 10.0.0, including cached version reporting.
+
+Real-dump tests cover .NET 10.0.0, 10.0.1, 10.0.9 and 10.0.12–10.0.14, and ASP.NET Core 10.0.0,
+10.0.1 and 10.0.12–10.0.14. Before extending the range, compare the affected source layouts, field
+names and enum values, and test a dump from the new release. Keep warnings for releases outside
+the checked range, previews and release candidates. Satori layout detection remains structural.
 
 ## Code and packaging
 

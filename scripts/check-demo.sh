@@ -71,6 +71,9 @@ queued = {q["workItem"]: q["items"] for q in r["blocked"]["queuedWorkItems"]}
 check(queued.get("Shop.Pool.Block", 0) >= 20, f"20 work items wait in a starved thread pool ({queued.get('Shop.Pool.Block', 0)})")
 check(queued.get("Shop.Pool.Resume", 0) == 5, f"5 async calls wait in the queue to resume ({queued.get('Shop.Pool.Resume', 0)})")
 check(any(g["state"] == "queued" and g["outermostCall"].startswith("Pool.Resume") and g["tasks"] == 5 for g in json.load(open("tasks.json"))["groups"]), "the tasks command shows the 5 calls as queued")
+running = [g for g in json.load(open("tasks.json"))["groups"] if g["outermostCall"].startswith("Jobs.RunContinuously")]
+check(len(running) == 1 and running[0]["state"] == "running" and running[0]["tasks"] == 1,
+      "the async task executing on a dedicated thread is running")
 check(any(g["outermostCall"].startswith("Jobs.RunBatch (await 0, Program.cs:") for g in json.load(open("tasks.json"))["groups"]), "await source lines from the PDB embedded in Demo.dll")
 owner = next((t for t in r["locks"]["heldLocks"] if "(cache owner) holds Monitor on Object, held by static Shop.Locks.Cache" in t["thread"]), None)
 check(owner and sum(w["threads"] for w in owner.get("children", [])) == 3, "3 threads wait for the lock that the cache owner holds")
