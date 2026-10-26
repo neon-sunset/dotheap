@@ -71,6 +71,6 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --sign - "$app"
+codesign --force --sign - --entitlements assets/Debugger.entitlements "$app"
 codesign --verify --deep --strict "$app"
 echo "$app"

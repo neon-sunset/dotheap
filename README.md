@@ -112,10 +112,10 @@ dotheap dump 4321 --out core.dmp.zst
 dotheap summary --pid 4321
 ```
 
-Process discovery and capture are supported on Linux and macOS. `ps` finds .NET diagnostics
-sockets in `TMPDIR` and `/tmp`; diagnostics must be enabled and the socket accessible. `--pid`
-captures first, then runs the selected analysis command. `--out` and `--offline` also apply.
-On macOS, capture requires `--offline`.
+Process discovery and capture are supported on Linux and macOS. `ps` lists running processes
+and identifies .NET applications by diagnostics sockets in `TMPDIR` and `/tmp`. Processes with
+diagnostics disabled appear among other applications. `--pid` captures first, then runs the
+selected analysis command. `--out`, `--pause` and `--offline` also apply.
 
 ### Live Linux capture
 
@@ -132,10 +132,32 @@ Capture fails if the process exits or replaces its address space before the fina
 required memory or register read fails at the final stop. Deleting a mapped file does not by itself
 make its memory unreadable. Deleted mappings are identified by `files` and in the Viewer.
 
+### macOS capture
+
+On Apple silicon, Dotheap captures a kernel copy-on-write snapshot and writes it directly as
+independent compressed frames. The process continues while the dump is written. If the kernel
+cannot create a snapshot, the Viewer offers to pause the process for capture. The CLI requires
+`--pause` for this fallback; it never switches automatically. Cancellation or failure resumes
+the process and removes the unfinished output. Closing the capturing process also releases
+its suspension token. Other processes can still change shared memory.
+
+Direct capture needs macOS debugger access. The packaged CLI and Viewer carry the debugger
+entitlement; protected applications may still deny access, even as root. Translated x86 processes
+are not supported. Device I/O mappings are omitted because reading them can affect the device.
+The Viewer separates .NET applications and other applications in the process list. Native macOS
+analysis currently shows mappings and stacks; Darwin malloc chunk analysis is not implemented.
+The Viewer sorts processes by physical footprint by default and can also sort by PID, program
+or user. **Pause for .NET runtime dump** selects .NET
+diagnostics instead of a kernel snapshot.
+
+Capture reads and compresses memory blocks in parallel. Full dumps include readable shared-library
+mappings as well as private memory, so capture size can substantially exceed the process's physical
+footprint. Captures include region residency measured before reading memory and the process's
+physical footprint measured just before the snapshot.
+
 ### Runtime capture
 
-With `--offline`, Dotheap asks the .NET runtime to write a full dump. This is the only capture mode
-available on macOS. **The process stays paused for the entire raw-dump write.** For large heaps,
+With `--offline`, Dotheap asks the .NET runtime to write a full dump. **The process stays paused for the entire raw-dump write.** For large heaps,
 this makes runtime capture impractical
 on services that must keep serving traffic.
 
@@ -242,7 +264,7 @@ a binary only if its build ID matches, or its first page matches when no build I
 | `collections`, `strings`, `zero-arrays`, `boxed`, `finalizable` | Collection capacity, duplicate strings, mostly zero arrays, boxed values and finalizer states. |
 | `findings` | Heap integrity, potential leaks, blocked work and inefficient memory use, with commands for detailed reports. |
 | `verify` | Invalid object, type and runtime structures, with field addresses and values. Works without the reference graph. |
-| `ps`, `dump <pid>` | Discover local .NET processes or capture one. Linux defaults to live capture. Runtime capture requires `--offline`, including on macOS. |
+| `ps`, `dump <pid>` | Discover local processes or capture one. Linux uses live capture; Apple silicon macOS uses a kernel snapshot. Runtime capture requires `--offline`. |
 | `cache`, `symbols` | List or remove analysis caches; download matching .NET runtime symbols. |
 | `report` | A full text report, also available as `dotheap core.dmp`. Uses `--top` rather than `--limit`; see `dotheap help report`. |
 
@@ -298,8 +320,13 @@ Other startup options include `-smaps <file>`, `-type <name>`, `-object <address
 
 ## Resident memory
 
-A dump records memory contents, not RSS or physical page sizes. Supply `/proc/<pid>/smaps` on
-Linux or `vmmap <pid>` output on macOS, taken close to the dump:
+Dotheap captures on macOS include residency data in the dump. The Residency view shows the
+physical footprint separately from resident mappings: shared pages can occur in several mappings,
+so their sum is not the process's physical footprint. Compressed and swapped pages are reported
+together. macOS does not supply Linux transparent-huge-page statistics.
+
+For other dumps, supply `/proc/<pid>/smaps` on Linux or `vmmap -wide <pid>` output on macOS,
+taken close to the dump. Residency cannot be reconstructed from memory contents alone:
 
 ```sh
 dotheap summary core.dmp --smaps core.smaps
@@ -394,11 +421,12 @@ cargo build --release --locked -p dotheap
 target/release/dotheap help
 ```
 
-The Viewer needs macOS 15+, Xcode 16 or later with Swift 6, and Python 3. The build script
-links the Rust core statically into the app:
+The Viewer needs macOS 15+, Xcode 16 or later with Swift 6, and Python 3. The macOS build script
+builds the CLI and Viewer, links the Rust core into the app, and signs both with the debugger
+entitlement needed for direct capture:
 
 ```sh
-scripts/make-app.sh
+scripts/build-macos.sh
 open Dotheap.app
 ```
 

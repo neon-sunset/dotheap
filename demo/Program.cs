@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -100,18 +101,6 @@ for (int i = 0; i < 25; i++) Bus.Clients.Add(new HttpClient());
 // Faulted tasks nobody observes.
 for (int i = 0; i < 60; i++) Bus.Faulted.Add(Task.Run(() => throw new InvalidOperationException("demo failure")));
 while (Bus.Faulted.Any(t => !t.IsCompleted)) Thread.Sleep(10);
-GC.Collect();
-// Garbage the dump should still show: async methods dropped while waiting, rented arrays that were not returned,
-// large arrays, SafeHandles that own native memory and were not disposed (pending finalization), and SafeHandles that
-// were disposed (dead: Dispose suppressed their finalizers).
-for (int i = 0; i < 400; i++) _ = Waiter.WaitForever();
-for (int i = 0; i < 100; i++) _ = ArrayPool<byte>.Shared.Rent(16384);
-for (int i = 0; i < 20; i++) _ = new byte[1 << 20];
-for (int i = 0; i < 30; i++) _ = new MallocHandle(65536);
-for (int i = 0; i < 20; i++) new NoopHandle().Dispose();
-// Objects without a finalizer that die holding native memory: nothing will free it.
-for (int i = 0; i < 50; i++) _ = new RawBuffer(32768);
-Thread.Sleep(200);
 // HttpClient requests to a server that accepts their connections and never answers.
 Net.Start();
 for (int i = 0; i < 1000 && Net.Accepted.Count < 5; i++) Thread.Sleep(10);
@@ -127,6 +116,15 @@ for (int i = 0; i < maxWorkers + 20; i++) ThreadPool.QueueUserWorkItem(Pool.Bloc
 for (int i = 0; i < 1000 && ThreadPool.PendingWorkItemCount < 20; i++) Thread.Sleep(10);
 resume.SetResult();
 if (Environment.GetEnvironmentVariable("DEMO_WRITES") == "1") Writes.Start();
+
+FinalizerBlocker.Start();
+// Leave garbage after startup allocations and keep finalizers blocked for a stable finalization backlog.
+for (int i = 0; i < 400; i++) _ = Waiter.WaitForever();
+for (int i = 0; i < 100; i++) _ = ArrayPool<byte>.Shared.Rent(16384);
+for (int i = 0; i < 20; i++) _ = new byte[1 << 20];
+for (int i = 0; i < 30; i++) _ = new MallocHandle(65536);
+for (int i = 0; i < 20; i++) new NoopHandle().Dispose();
+for (int i = 0; i < 50; i++) _ = new RawBuffer(32768);
 
 Console.WriteLine($"ready {Environment.ProcessId}");
 Console.Out.Flush();
@@ -233,6 +231,28 @@ namespace Shop
     {
         public override bool IsInvalid => false;
         protected override bool ReleaseHandle() => true;
+    }
+
+    sealed class FinalizerBlocker
+    {
+        private static readonly ManualResetEventSlim Entered = new();
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void Create() => _ = new FinalizerBlocker();
+
+        public static void Start()
+        {
+            Create();
+            GC.Collect();
+            if (!Entered.Wait(TimeSpan.FromSeconds(10)))
+                throw new InvalidOperationException("The demo finalizer did not start.");
+        }
+
+        ~FinalizerBlocker()
+        {
+            Entered.Set();
+            Thread.Sleep(Timeout.Infinite);
+        }
     }
 
     static class Leaky

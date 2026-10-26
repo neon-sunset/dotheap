@@ -8,6 +8,8 @@ if ! xcrun --find swift >/dev/null 2>&1; then
 fi
 
 cargo build --release --locked -p dotheap
+codesign --force --sign - --entitlements assets/Debugger.entitlements target/release/dotheap
+codesign --verify --strict target/release/dotheap
 scripts/make-app.sh --disable-sandbox
 mkdir -p bin
 cp target/release/dotheap bin/

@@ -491,6 +491,7 @@ mod tests {
                 threads: Vec::new(),
                 exited_thread_stacks: HashSet::new(),
                 shared_cache_ranges: Vec::new(),
+                residency: None,
             },
         };
         assert_eq!(elf_build_id(&dump, 0x100000).as_deref(), Some("11223344"));

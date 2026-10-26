@@ -1502,16 +1502,18 @@ public struct Process: @unchecked Sendable, Equatable {
     init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
     public var pid: Int32 { withExtendedLifetime(_owner) { dh_Process_pid(_pointer) } }
     public var name: String { withExtendedLifetime(_owner) { read_String(dh_Process_name(_pointer)!, _owner) } }
-    public var socket: String { withExtendedLifetime(_owner) { read_PathBuf(dh_Process_socket(_pointer)!, _owner) } }
+    public var socket: String? { withExtendedLifetime(_owner) { read_Option_PathBuf(dh_Process_socket(_pointer)!, _owner) } }
     public var uid: UInt32 { withExtendedLifetime(_owner) { dh_Process_uid(_pointer) } }
     public var gid: UInt32 { withExtendedLifetime(_owner) { dh_Process_gid(_pointer) } }
+    public var memoryBytes: UInt64? { withExtendedLifetime(_owner) { read_Option_u64(dh_Process_memory_bytes(_pointer)!, _owner) } }
     public static func == (lhs: Self, rhs: Self) -> Bool {
         if lhs._pointer == rhs._pointer { return true }
         return lhs.pid == rhs.pid &&
             lhs.name == rhs.name &&
             lhs.socket == rhs.socket &&
             lhs.uid == rhs.uid &&
-            lhs.gid == rhs.gid
+            lhs.gid == rhs.gid &&
+            lhs.memoryBytes == rhs.memoryBytes
     }
 }
 
@@ -2026,6 +2028,7 @@ public struct SnapshotInfo: @unchecked Sendable, Equatable {
     public var fromCache: Bool { withExtendedLifetime(_owner) { dh_SnapshotInfo_from_cache(_pointer) } }
     public var cacheDirectory: String? { withExtendedLifetime(_owner) { read_Option_String(dh_SnapshotInfo_cache_directory(_pointer)!, _owner) } }
     public var smapsPath: String? { withExtendedLifetime(_owner) { read_Option_String(dh_SnapshotInfo_smaps_path(_pointer)!, _owner) } }
+    public var physicalFootprint: UInt64? { withExtendedLifetime(_owner) { read_Option_u64(dh_SnapshotInfo_physical_footprint(_pointer)!, _owner) } }
     public var residencyCategories: RustArray<ResidencyCategory> { withExtendedLifetime(_owner) { read_Vec_ResidencyCategory(dh_SnapshotInfo_residency_categories(_pointer)!, _owner) } }
     public var versions: Versions { withExtendedLifetime(_owner) { read_Versions(dh_SnapshotInfo_versions(_pointer)!, _owner) } }
     public var total: RegionStats { withExtendedLifetime(_owner) { read_RegionStats(dh_SnapshotInfo_total(_pointer)!, _owner) } }
@@ -2053,6 +2056,7 @@ public struct SnapshotInfo: @unchecked Sendable, Equatable {
             lhs.fromCache == rhs.fromCache &&
             lhs.cacheDirectory == rhs.cacheDirectory &&
             lhs.smapsPath == rhs.smapsPath &&
+            lhs.physicalFootprint == rhs.physicalFootprint &&
             lhs.residencyCategories == rhs.residencyCategories &&
             lhs.versions == rhs.versions &&
             lhs.total == rhs.total &&
@@ -2911,10 +2915,19 @@ public func smapsNextToDump(path: String) -> String? {
     }
 }
 
-public func defaultDumpPath(process: Process) throws -> String {
+public func defaultDumpPath(process: Process, runtime: Bool) throws -> String {
     return try withExtendedLifetime((process)) {
-        let result = try take(dh_default_dump_path(process._pointer))
+        let result = try take(dh_default_dump_path(process._pointer, runtime))
         return withExtendedLifetime(result) { read_String(result.pointer, result) }
+    }
+}
+
+public func writeProcessDump(process: Process, path: String, pause: Bool, progress: (any Progress)) throws -> String? {
+    return try withExtendedLifetime((process)) {
+        return try withRustString(path) { path in
+            let result = try take(dh_write_process_dump(process._pointer, path, pause, transferProgress(progress)))
+            return withExtendedLifetime(result) { read_Option_String(result.pointer, result) }
+        }
     }
 }
 

@@ -31,9 +31,10 @@ fn runtime_capture_publishes_private_files_and_preserves_recovery_data() {
                 let process = Process {
                     pid: std::process::id() as i32,
                     name: "test".into(),
-                    socket,
+                    socket: Some(socket),
                     uid: unsafe { libc::geteuid() },
                     gid: unsafe { libc::getegid() },
+                    memory_bytes: None,
                 };
                 if existing {
                     fs::write(&output, b"existing output").unwrap();

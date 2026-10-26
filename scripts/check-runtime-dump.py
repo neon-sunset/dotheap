@@ -11,7 +11,7 @@ import tempfile
 import threading
 
 
-def require_offline(binary):
+def no_runtime_fallback(binary):
     with tempfile.TemporaryDirectory(prefix="dh-ipc-", dir="/tmp") as folder:
         output = Path(folder) / "capture.dmp.zst"
         with socket.socket(socket.AF_UNIX) as server:
@@ -20,13 +20,18 @@ def require_offline(binary):
             for command in (["dump", str(os.getpid())], ["summary", "--pid", str(os.getpid())]):
                 result = subprocess.run([binary, *command, "--out", str(output), "--json"],
                                         env={**os.environ, "TMPDIR": folder}, capture_output=True,
-                                        text=True, timeout=15)
-                assert result.returncode == 1, result.stderr
-                assert "--offline" in result.stderr, result.stderr
-                assert not result.stdout, result.stdout
-                assert not output.exists()
+                                        text=True, timeout=90)
+                # Direct capture depends on host permissions. Neither outcome may use the diagnostics socket.
+                assert result.returncode in (0, 1), result.stderr
+                if result.returncode == 0:
+                    assert output.is_file() and output.stat().st_size > 0
+                    output.unlink()
+                else:
+                    assert "--offline" in result.stderr, result.stderr
+                    assert not result.stdout, result.stdout
+                    assert not output.exists()
                 assert not select.select([server], [], [], 0)[0], "runtime capture started without --offline"
-        print("runtime-requires-offline: passed")
+        print("no-runtime-fallback: passed")
 
 
 def check(binary, case):
@@ -95,7 +100,6 @@ def check(binary, case):
 
 if __name__ == "__main__":
     binary = str(Path(sys.argv[1]).resolve())
-    if sys.platform != "linux":
-        require_offline(binary)
+    no_runtime_fallback(binary)
     for case in ("raw", "compressed", "existing-raw", "existing-compressed", "neighbors", "raw-race", "compressed-race"):
         check(binary, case)

@@ -424,7 +424,11 @@ impl HeapSnapshot {
             types.portion(0.0, 0.1),
         ));
         let smaps_path = smaps_path.or_else(|| smaps::next_to_dump(path));
-        let smaps = smaps_path.as_ref().map(|p| smaps::read(p)).transpose()?;
+        let smaps = smaps_path
+            .as_ref()
+            .map(|p| smaps::read(p))
+            .transpose()?
+            .or_else(|| dump.residency.as_ref().map(|r| r.mappings.clone()));
         let symbol_identity = crate::symbols::cache_identity_with_progress(
             &dump,
             types.portion(0.1, 0.6).named("Checking cached symbols"),

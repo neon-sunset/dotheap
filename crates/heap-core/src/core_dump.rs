@@ -81,6 +81,8 @@ pub struct Layout {
     pub threads: Vec<Thread>,
     pub exited_thread_stacks: HashSet<usize>,
     pub shared_cache_ranges: Vec<(u64, u64)>,
+    #[serde(default)]
+    pub residency: Option<crate::smaps::CapturedResidency>,
 }
 
 pub struct CoreDump {
@@ -121,6 +123,7 @@ impl CoreDump {
                 threads: vec![],
                 exited_thread_stacks: HashSet::new(),
                 shared_cache_ranges: vec![],
+                residency: None,
             }),
         };
         if !saved {
@@ -372,6 +375,32 @@ impl CoreDump {
                         writable: prot & 2 != 0,
                         executable: prot & 4 != 0,
                     });
+                }
+            } else if kind == 0x31 {
+                if size < 40 {
+                    return Err(self.error("truncated Mach-O note"));
+                }
+                let h = self.file(p, 40)?;
+                if &h[8..24] == crate::smaps::MACH_NOTE_OWNER {
+                    let (offset, length) = (h.u64(24).unwrap(), h.u64(32).unwrap());
+                    self.validate_file_range(offset, length)?;
+                    if length > 64 << 20 {
+                        return Err(self.error("residency note is too large"));
+                    }
+                    let note: crate::smaps::CapturedResidency =
+                        serde_json::from_slice(self.file(offset, length)?)
+                            .map_err(|e| self.error(&format!("invalid residency note: {e}")))?;
+                    if note.mappings.iter().any(|m| {
+                        m.end <= m.start
+                            || m.rss > m.end - m.start
+                            || m.swap > m.end - m.start
+                            || m.private_bytes > m.rss
+                    }) {
+                        return Err(self.error("invalid residency mapping"));
+                    }
+                    if note.version == 1 {
+                        self.layout.residency = Some(note);
+                    }
                 }
             } else if kind == 4 {
                 let mut q = p + 8;

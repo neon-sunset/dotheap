@@ -57,6 +57,7 @@ public final class HeapSnapshot: @unchecked Sendable {
     public var fromCache: Bool { info.fromCache }
     public var cacheDirectory: String? { info.cacheDirectory }
     public var smapsPath: String? { info.smapsPath }
+    public var physicalFootprint: UInt64? { info.physicalFootprint }
     public var smaps: RustArray<SmapsMapping>? { bridge.smaps() }
     public var residencyCategories: RustArray<ResidencyCategory> { info.residencyCategories }
     public var agreeingResidency: Residency? { residency.flatMap { $0.agrees ? $0 : nil } }

@@ -188,9 +188,12 @@ final class Session {
 
     var fromCache = false
     var converting = false
+    private enum CaptureMode { case snapshot, runtime }
+    private var captureMode: CaptureMode?
+    var canCancelCapture: Bool { captureMode == .snapshot }
     @ObservationIgnored private var openTask: Task<Void, Never>?
 
-    func cancelConversion() { openTask?.cancel() }
+    func cancelOpen() { openTask?.cancel() }
 
     private enum ConversionChoice { case original, convert(String?), cancel }
 
@@ -228,6 +231,7 @@ final class Session {
     }
 
     func open(dump: String, smaps: String?, dlls: String?, rebuild: Bool = false) {
+        openTask?.cancel(); captureMode = nil
         dumpPath = dump; smapsPath = smaps; dllFolder = dlls
         snapshot = nil; error = nil; loading = true; phase = "Opening the dump"; fraction = 0
         reports = nil; integrityReport = nil; summaryFindings = nil
@@ -324,17 +328,53 @@ final class Session {
     /// Counts opens and cache deletions, so that the views of the cache folders read them again.
     var cacheChanges = 0
 
-    /// Asks a running .NET process for a full dump through its diagnostics socket, then opens the dump.
-    func open(process p: LiveProcess.Process) {
-        snapshot = nil; error = nil; loading = true; fraction = 0
-        phase = "Writing a full dump of \(p.name) (pid \(p.pid))"
-        Task.detached(priority: .userInitiated) {
+    private func confirmPausedCapture(_ reason: String, process: LiveProcess.Process) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Pause \(process.name) to capture it?"
+        alert.informativeText = "\(reason)\n\nThe process will stay paused until the compressed dump is written. Cancelling capture resumes it."
+        alert.addButton(withTitle: "Pause and Capture")
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal()
+        alert.window.orderOut(nil)
+        return response == .alertFirstButtonReturn
+    }
+
+    func open(process p: LiveProcess.Process, runtime: Bool = false) {
+        openTask?.cancel()
+        snapshot = nil; error = nil; loading = true; fraction = 0; dumpPath = nil
+        captureMode = runtime ? .runtime : .snapshot
+        phase = runtime ? "Requesting a .NET runtime dump of \(p.name)" : "Capturing \(p.name) (pid \(p.pid))"
+        openTask = Task.detached(priority: .userInitiated) {
             do {
-                let path = try LiveProcess.defaultDumpPath(for: p)
-                try LiveProcess.writeDump(p, to: path)
-                await MainActor.run { self.open(dump: path, smaps: nil, dlls: nil) }
+                let path = try LiveProcess.defaultDumpPath(for: p, runtime: runtime)
+                await MainActor.run { self.dumpPath = path }
+                let progress: (String, Double) -> Void = { phase, fraction in
+                    Task { @MainActor in
+                        guard self.captureMode != nil else { return }
+                        self.phase = phase; self.fraction = fraction
+                    }
+                }
+                if runtime {
+                    try LiveProcess.writeRuntimeDump(p, to: path, progress: progress)
+                } else if let reason = try LiveProcess.writeDump(p, to: path, progress: progress, cancelled: { Task.isCancelled }) {
+                    try Task.checkCancellation()
+                    guard await self.confirmPausedCapture(reason, process: p) else {
+                        await MainActor.run { self.captureMode = nil; self.loading = false }
+                        return
+                    }
+                    _ = try LiveProcess.writeDump(p, to: path, pause: true, progress: progress, cancelled: { Task.isCancelled })
+                }
+                try Task.checkCancellation()
+                await MainActor.run {
+                    self.captureMode = nil
+                    self.open(dump: path, smaps: nil, dlls: nil)
+                }
             } catch {
-                await MainActor.run { self.error = analysisErrorMessage(error); self.loading = false }
+                let cancelled = Task.isCancelled
+                await MainActor.run {
+                    self.error = cancelled ? nil : analysisErrorMessage(error)
+                    self.captureMode = nil; self.loading = false
+                }
             }
         }
     }

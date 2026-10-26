@@ -1,12 +1,14 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 mod core_file;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod macos;
 #[cfg(target_os = "linux")]
 mod mappings;
 #[cfg(target_os = "linux")]
 mod memory;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 mod meter;
 #[cfg(target_os = "linux")]
 mod notes;
@@ -47,6 +49,7 @@ pub struct Status {
 pub struct CaptureError {
     pub description: String,
     pub runtime_can_write: bool,
+    pub pause_can_capture: bool,
 }
 
 impl CaptureError {
@@ -54,6 +57,7 @@ impl CaptureError {
         Self {
             description: description.into(),
             runtime_can_write: true,
+            pause_can_capture: false,
         }
     }
 
@@ -61,10 +65,11 @@ impl CaptureError {
         Self {
             description: description.into(),
             runtime_can_write: false,
+            pause_can_capture: false,
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
     fn system(description: impl fmt::Display) -> Self {
         Self::new(format!("{description}: {}", io::Error::last_os_error()))
     }
@@ -88,16 +93,20 @@ impl From<crate::Error> for CaptureError {
 }
 
 pub type Result<T> = std::result::Result<T, CaptureError>;
-pub const SUPPORTED: bool = cfg!(target_os = "linux");
+pub const SUPPORTED: bool = cfg!(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64")
+));
 
 #[derive(Default)]
 pub struct CaptureOptions<'a> {
+    pub pause: bool,
     pub progress: Option<&'a (dyn Fn(&str) + Sync)>,
     pub status: Option<&'a (dyn Fn(Status) + Sync)>,
     pub cancelled: Option<&'a (dyn Fn() -> bool + Sync)>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 impl CaptureOptions<'_> {
     fn report(&self, text: impl AsRef<str>) {
         if let Some(progress) = self.progress {
@@ -124,6 +133,11 @@ pub fn default_path(pid: i32) -> crate::Result<PathBuf> {
 }
 
 pub fn write(pid: i32, path: &Path, options: &CaptureOptions<'_>) -> Result<CaptureResult> {
+    if options.pause && !cfg!(target_os = "macos") {
+        return Err(CaptureError::terminal(
+            "paused capture is available only on macOS",
+        ));
+    }
     #[cfg(target_os = "linux")]
     {
         // Kernel ptrace ownership ends with this thread, including tracees that cannot enter a stop.
@@ -135,10 +149,16 @@ pub fn write(pid: i32, path: &Path, options: &CaptureOptions<'_>) -> Result<Capt
                 .map_err(|_| CaptureError::terminal("the capture worker failed"))?
         })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        macos::write(pid, path, options)
+    }
+    #[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
     {
         let _ = (pid, path, options);
-        Err(CaptureError::new("live capture requires Linux"))
+        Err(CaptureError::new(
+            "direct capture requires Linux or macOS on Apple silicon",
+        ))
     }
 }
 
