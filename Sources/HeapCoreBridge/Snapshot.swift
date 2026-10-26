@@ -78,6 +78,12 @@ public final class HeapSnapshot: @unchecked Sendable {
     public var ownership: OwnershipGraph {
         get throws { try memo("ownership wrapper") { OwnershipGraph(try bridge.ownership()) } }
     }
+    public func ownerTree(managedOnly: Bool = false) throws -> OwnerTree {
+        try memo("owner tree \(managedOnly)") { OwnerTree(try bridge.ownerTree(managedOnly: managedOnly)) }
+    }
+    public func storageOwnerTree(_ object: Int) throws -> OwnerTree {
+        try memo("storage owner tree \(object)") { OwnerTree(try bridge.storageOwnerTree(object: object)) }
+    }
     public var typeRetained: RustArray<UInt64> {
         get throws { try memo("type retained") { try bridge.typeRetained() } }
     }

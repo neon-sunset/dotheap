@@ -12,12 +12,12 @@ AnalysisOptions TypeStats RegionStats OccupancyHistogram MemoryPart HeapKind Pag
 MethodTableInfo RootSource GcHandle NativeMemory Category MallocParameters
 Residency SmapsMapping Versions Platform FileMapping Thread TypeGroup HandleGroup
 Word FieldValue StructElement ReferenceElement TextPreview DominatorGroup Granule RegionStrip
-Chunk ChunkGroup ChunkAttribution ChunkSizeGroup ReachTotal OwnershipGroup OwnershipRoot OwnershipTypeGroup OwnershipNode CheckReport SummaryFinding TaskGraphs
+Chunk ChunkGroup ChunkAttribution ChunkSizeGroup ReachTotal OwnershipGroup OwnershipRoot OwnershipTypeGroup OwnershipNode OwnerEntry StaticReference CheckReport SummaryFinding TaskGraphs
 ThreadInfo ThreadState ThreadGroup StackNode DuplicateString CollectionCapacity ZeroArrays
 TypeCount Finalizable GarbageGroup Timers Network Files FragmentationReport SearchResult
 SymbolDownload Process CacheEntry QueuedWorkItem AsyncAnalysis HeapVerification
 """.split()
-OBJECTS = ['Snapshot', 'NativeGraphView', 'OwnershipView', 'GarbageView', 'ThreadStacksView']
+OBJECTS = ['Snapshot', 'NativeGraphView', 'OwnershipView', 'OwnerTreeView', 'GarbageView', 'ThreadStacksView']
 PRIMITIVES = {
     'u8': ('uint8_t', 'UInt8'), 'u16': ('uint16_t', 'UInt16'),
     'u32': ('uint32_t', 'UInt32'), 'u64': ('uint64_t', 'UInt64'),

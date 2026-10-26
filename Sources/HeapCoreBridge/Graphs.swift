@@ -242,3 +242,19 @@ public struct ThreadStacks: Sendable {
     public func label(_ tid: Int32) -> String { bridge.label(tid: tid) }
     public func summary(_ thread: ThreadInfo) -> String { bridge.summary(tid: thread.tid) ?? "" }
 }
+
+public struct OwnerTree: Sendable {
+    private let bridge: OwnerTreeView
+    public let rootNode: Int
+
+    init(_ bridge: OwnerTreeView) {
+        self.bridge = bridge
+        rootNode = bridge.root()
+    }
+
+    public func entry(_ node: Int) throws -> OwnerEntry { try bridge.entry(node: node)! }
+    public func children(of node: Int) -> RustArray<Int> { bridge.children(node: node) }
+    public func groups(of node: Int) throws -> RustArray<OwnershipGroup> { try bridge.groups(node: node) }
+    public var roots: RustArray<OwnerEntry> { get throws { try bridge.roots() } }
+    public func storageFields(of object: Int) -> RustArray<StaticReference> { bridge.storageFields(object: object) }
+}

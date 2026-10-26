@@ -10,16 +10,17 @@ struct RootsView: View {
     var body: some View {
         Computed(snapshot, key: "ownership root sources", label: "Reading root sources", compute: { snapshot in
             let graph = try snapshot.ownership
-            return (graph, graph.roots)
-        }) { graph, roots in
+            let tree = try snapshot.ownerTree()
+            return (graph, tree, try tree.roots)
+        }) { graph, tree, roots in
             SplitPanes(axis: .horizontal, firstMin: 320, secondMin: 240, initial: 0.65, showSecond: selected != nil) {
                 SplitPanes(axis: .vertical, firstMin: 200, secondMin: 160, initial: 0.6) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Direct references from stacks, registers, GC handles and native memory. Retained bytes are reachable only through that source; shared allocations appear under their common dominator.")
+                        Text("Roots include static fields grouped by declaring type, stacks, registers, GC handles and native memory. Retained bytes are reachable only through that source; shared allocations appear under their common dominator.")
                             .font(.caption).foregroundStyle(.secondary)
-                        TextTable(rows: roots, id: { $0.node }, columns: [
-                            .init("Source", width: 340, minWidth: 110, flexible: true, truncation: .byTruncatingMiddle, value: \.name, text: \.name,
-                                  help: { "\($0.name)\nManaged references: \($0.objects.formatted())\nNative references: \($0.chunks.formatted())" }),
+                        TextTable(rows: roots, id: { $0.id }, columns: [
+                            .init("Source", width: 340, minWidth: 110, flexible: true, truncation: .byTruncatingMiddle, value: \.name, text: { $0.name + ($0.threadStatic ? " (thread statics)" : "") },
+                                  help: { $0.name }),
                             .init("Managed bytes", width: 105, minWidth: 65, font: .digits, value: \.managed, text: { Format.bytes($0.managed) }),
                             .init("Native bytes", width: 95, minWidth: 65, font: .digits, value: \.native, text: { Format.bytes($0.native) }),
                         ], sort: $order, selection: selected, select: { selected = $0 })
@@ -30,9 +31,16 @@ struct RootsView: View {
                 }
                 .padding(.trailing, selected == nil ? 0 : PageInsets.detail)
             } second: {
-                if let selected, let source = roots.first(where: { $0.node == selected }) {
-                    RootReferences(snapshot: snapshot, graph: graph, source: source).id(selected)
-                        .padding(.leading, PageInsets.detail)
+                if let selected, let source = roots.first(where: { $0.id == selected }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if source.kind == .source, let original = graph.roots.first(where: { $0.node == selected }) {
+                            RootReferences(snapshot: snapshot, graph: graph, source: original)
+                        } else {
+                            Text(source.name).font(.headline).textSelection(.enabled)
+                            DominatorTree(snapshot: snapshot, graph: tree, groupByType: true, root: selected, wide: false, compact: true)
+                        }
+                    }
+                    .id(selected).padding(.leading, PageInsets.detail)
                 }
             }
             .padding(PageInsets.content)
