@@ -111,6 +111,8 @@ struct DominatorTree: View {
                 DominatorRow(snapshot: snapshot, graph: graph, row: row, open: open.contains(row.id), wide: wide, compact: compact) {
                     if case let .more(parent, _) = row.item { limits[parent, default: 100] += 200 } else if row.hasChildren { toggle(row) }
                 }
+                .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
+                .alignmentGuide(.listRowSeparatorTrailing) { $0[.trailing] }
                 .listRowInsets(EdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8))
             }
             .listStyle(.plain)
