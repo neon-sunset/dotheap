@@ -118,16 +118,27 @@ resume.SetResult();
 if (Environment.GetEnvironmentVariable("DEMO_WRITES") == "1") Writes.Start();
 
 FinalizerBlocker.Start();
-// Leave garbage after startup allocations and keep finalizers blocked for a stable finalization backlog.
-for (int i = 0; i < 400; i++) _ = Waiter.WaitForever();
-for (int i = 0; i < 100; i++) _ = ArrayPool<byte>.Shared.Rent(16384);
-for (int i = 0; i < 20; i++) _ = new byte[1 << 20];
-for (int i = 0; i < 30; i++) _ = new MallocHandle(65536);
-for (int i = 0; i < 20; i++) new NoopHandle().Dispose();
-for (int i = 0; i < 50; i++) _ = new RawBuffer(32768);
+// Keep the garbage alive through setup and collection, then remove its references for the dump.
+object[] garbage = new object[620];
+int garbageIndex = 0;
+for (int i = 0; i < 400; i++) garbage[garbageIndex++] = Waiter.WaitForever();
+for (int i = 0; i < 100; i++) garbage[garbageIndex++] = ArrayPool<byte>.Shared.Rent(16384);
+for (int i = 0; i < 20; i++) garbage[garbageIndex++] = new byte[1 << 20];
+for (int i = 0; i < 30; i++) garbage[garbageIndex++] = new MallocHandle(65536);
+for (int i = 0; i < 20; i++)
+{
+    var handle = new NoopHandle();
+    handle.Dispose();
+    garbage[garbageIndex++] = handle;
+}
+for (int i = 0; i < 50; i++) garbage[garbageIndex++] = new RawBuffer(32768);
 
-Console.WriteLine($"ready {Environment.ProcessId}");
-Console.Out.Flush();
+string ready = $"ready {Environment.ProcessId}";
+var output = Console.Out;
+GC.Collect();
+Array.Clear(garbage);
+output.WriteLine(ready);
+output.Flush();
 Thread.Sleep(Timeout.Infinite);
 
 namespace Shop
