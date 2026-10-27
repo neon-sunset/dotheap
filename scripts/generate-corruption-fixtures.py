@@ -31,11 +31,15 @@ for gc in ["satori", "coreclr"]:
             modes += ["segment-cycle", "segment-boundary", "finalization-boundary"]
         if gc == "satori":
             modes += ["string", "array", "array-too-long", "tracker-cycle", "tracker-overfull", "queue-self-link", "queue-cycle", "many-bad-refs", "struct-array"]
+            modes += ["huge-stale-tail", "huge-zero-tail", "huge-object-tail", "huge-leading-filler",
+                      "huge-too-long", "huge-bad-mt", "huge-bad-bounds"]
         for mode in modes:
             name = f"{gc}-{arch}-{mode}"
             path = folder / (name + ".dmp")
             if gc == "coreclr":
                 compat.coreclr(path, arch, "workstation-regions")
+            elif mode.startswith("huge-"):
+                compat.huge_region(path, mode)
             elif mode == "many-bad-refs":
                 contract.core(path, base=24, component=8, length=1300, series=((16, 0),))
             elif mode == "struct-array":
@@ -79,7 +83,13 @@ for gc in ["satori", "coreclr"]:
                 for i in range(7):
                     put(page + 0x5000 + i * 8, page + 0x5100 + (8 if i == 6 else 0))
             expected = None
-            if mode == "integer-data":
+            if mode == "huge-too-long":
+                expected = ("Invalid", "Object size", first + 8)
+            elif mode == "huge-bad-mt":
+                expected = ("MissingMemory", "Object.MethodTable", first)
+            elif mode == "huge-bad-bounds":
+                expected = ("Invalid", "GC region", contract.REGION)
+            elif mode == "integer-data":
                 put(first + 16, 0xdeadbeefdeadbee0)
             elif mode == "many-bad-refs":
                 for i in range(1300): put(first + 16 + i * 8, 0xdeadbeefdeadbee0)
@@ -164,5 +174,5 @@ for gc in ["satori", "coreclr"]:
                 put(contract.REGION + 152, contract.REGION)
                 expected = ("Invalid", "Satori region next", contract.REGION + 152)
             path.write_bytes(data)
-            cases.append(dict(name=name, expected=expected))
+            cases.append(dict(name=name, expected=expected, objects=1 if mode.startswith("huge-") else None))
 (folder / "expected.json").write_text(json.dumps(cases, indent=2) + "\n")

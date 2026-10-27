@@ -99,6 +99,55 @@ def sharded_gc_storage(folder):
             path.write_bytes(data)
 
 
+def huge_region(path, mode):
+    contract.core(path, base=24, component=2, length=8, series=())
+    data = bytearray(path.read_bytes())
+    data.extend(bytes(8192 + 0x600000 - len(data)))
+    data[176:232] = contract.segment(1, 8192, contract.PAGE, len(data) - 8192)
+
+    def put(address, value, fmt="Q"):
+        struct.pack_into("<" + fmt, data, 8192 + address - contract.PAGE, value)
+
+    filler = 24 if mode == "huge-leading-filler" else 0
+    size = (1 << 21) - 36888 - 16 if filler else (1 << 21) + 24
+    obj = contract.FIRST + filler
+    end = obj + size
+    used = end + 920088
+    committed = (used + 4095) & ~4095
+    put(contract.REGION + 24, contract.REGION + (1 << 22))
+    put(contract.REGION + 88, used)
+    put(contract.REGION + 96, committed)
+    put(contract.REGION + 168, size)
+    put(contract.REGION + 220, 1, "I")
+    if filler:
+        put(contract.FIRST, contract.PAGE + 0x2100)
+        put(contract.FIRST + 8, 0, "I")
+    put(obj, contract.MT)
+    put(obj + 8, (size - 24) // 2, "I")
+    if mode == "huge-object-tail":
+        put(end, contract.PAGE + 0x2200)
+    elif mode != "huge-zero-tail":
+        put(end, contract.PAGE + 0x7000)
+        put(contract.PAGE + 0x7004, 31749, "I")
+    if mode == "huge-too-long":
+        put(obj + 8, 1 << 23, "I")
+    elif mode == "huge-bad-mt":
+        put(obj, 0x123456789000)
+    elif mode == "huge-bad-bounds":
+        put(contract.REGION + 88, committed + 8)
+        # An intact second region lets layout detection resolve the damaged header.
+        data.extend(bytes(1 << 21))
+        data[176:232] = contract.segment(1, 8192, contract.PAGE, len(data) - 8192)
+        data[8192 + 0x403] = 1
+        other = contract.REGION + (1 << 22)
+        put(other + 16, 2, "i")
+        put(other + 24, other + (1 << 21))
+        put(other + 32, contract.PAGE)
+        put(other + 88, other + 36880)
+        put(other + 96, other + 0x10000)
+    path.write_bytes(data)
+
+
 def native_allocations(path):
     contract.core(path, refs={8: 1}, rooted=True)
     data = bytearray(path.read_bytes())

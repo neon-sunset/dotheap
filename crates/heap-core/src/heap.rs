@@ -230,6 +230,7 @@ struct RegionWalk {
     stopped_at: Option<u64>,
     stopped_after_gap: bool,
     first_unparsed_object: Option<u64>,
+    used_end: Option<u64>,
 }
 
 impl ManagedHeap {
@@ -536,6 +537,12 @@ impl ManagedHeap {
         self.dump.check()?;
         let mut total = 0usize;
         for (r, result) in self.saved.regions.iter_mut().zip(results) {
+            if let Some(end) = result.used_end
+                && r.used <= r.committed
+                && r.committed <= r.end
+            {
+                r.used = end;
+            }
             r.first_object = total;
             total = total
                 .checked_add(result.objects)
@@ -673,9 +680,16 @@ fn walk_region(
     let (mut objects, mut tables) = (Cursor::new(dump, true), Cursor::new(dump, false));
     let (mut last_mt, mut flags, mut base, mut free) = (0, 0, 0, false);
     let limit = r.used.min(r.end);
+    // Satori huge regions contain one object, possibly preceded by a free filler.
+    // Their dirty watermark can extend beyond that object's end after region reuse.
+    let object_limit = if gc == Gc::Satori && r.has_generation() {
+        limit.min(r.start + GRANULE)
+    } else {
+        limit
+    };
     let mut gap = gaps.partition_point(|&(_, end)| end <= r.start);
     let (mut o, mut after_zeros) = (r.object_start, false);
-    while o <= limit.saturating_sub(8) && o < limit {
+    while o <= object_limit.saturating_sub(8) && o < object_limit {
         while gap < gaps.len() && gaps[gap].1 <= o {
             gap += 1;
         }
@@ -711,7 +725,7 @@ fn walk_region(
         if mt == 0 {
             w.first_unparsed_object.get_or_insert(o);
             let mut next = o + 8;
-            while next <= limit.saturating_sub(8) && objects.u64(next) == Some(0) {
+            while next <= object_limit.saturating_sub(8) && objects.u64(next) == Some(0) {
                 next += 8;
             }
             w.unparsed += next - o;
@@ -751,7 +765,7 @@ fn walk_region(
                 && o.checked_add(size)
                     .is_some_and(|end| end <= r.end && (free || end <= limit.min(r.committed)));
             if valid && after_zeros {
-                let after = if o + size < limit {
+                let after = if o + size < object_limit {
                     objects.u64(o + size).map(|v| v & !7)
                 } else {
                     Some(0)
@@ -788,8 +802,14 @@ fn walk_region(
             emit(o, mt, size, length);
             w.objects += 1;
             w.object_bytes += size;
+            if object_limit < limit && o + size >= object_limit {
+                w.used_end = Some(o + size);
+            }
         }
         o += size;
+    }
+    if w.used_end.is_none() && o >= object_limit && o < limit {
+        w.unparsed += limit - o;
     }
     w
 }
