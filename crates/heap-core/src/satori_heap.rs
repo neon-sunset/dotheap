@@ -210,19 +210,8 @@ fn classify_gc_storage(
     }
     if let Some(heap) = pages.first().and_then(|p| dump.u64(p.start + 32))
         && dump.u64(heap) == Some(heap)
-        && (0..9).all(|i| {
-            heap.checked_add(8 + i * 8)
-                .and_then(|address| dump.u64(address))
-                .and_then(|queue| dump.u32(queue))
-                == Some(0)
-        })
-        && let Some(head) = heap
-            .checked_add(80)
-            .and_then(|address| dump.u64(address))
-            .and_then(|list| dump.u64(list))
     {
-        // The allocator starts with the heap pointer, nine region queues, and the work list.
-        heads.push(head);
+        heads.extend(allocator_work_chunk_heads(dump, heap));
     }
     let work_regions: HashMap<_, _> = regions
         .iter()
@@ -268,6 +257,49 @@ fn classify_gc_storage(
             chunk = next;
         }
     }
+}
+
+fn allocator_work_chunk_heads(dump: &CoreDump, heap: u64) -> Vec<u64> {
+    let Some(list) = heap.checked_add(80).and_then(|at| dump.u64(at)) else {
+        return Vec::new();
+    };
+    let queues: Option<Vec<_>> = (0..9)
+        .map(|i| heap.checked_add(8 + i * 8).and_then(|at| dump.u64(at)))
+        .collect();
+    let Some(queues) = queues else {
+        return Vec::new();
+    };
+    let mut heads = Vec::new();
+    if queues.iter().all(|&queue| dump.u32(queue) == Some(0)) {
+        heads.extend(dump.u64(list));
+    }
+
+    let alignment = if dump.platform.is_arm64() { 128 } else { 64 };
+    if let Some(count) = shard_count(dump, list, 128, 128)
+        && queues.iter().all(|&queue| {
+            shard_count(dump, queue, alignment, 2 * alignment).is_some_and(|count| {
+                (0..count).all(|i| dump.u32(queue + alignment + i * 2 * alignment) == Some(0))
+            })
+        })
+    {
+        for i in 0..count {
+            heads.extend(dump.u64(list + 128 + i * 128));
+        }
+    }
+    heads
+}
+
+fn shard_count(dump: &CoreDump, address: u64, alignment: u64, stride: u64) -> Option<u64> {
+    if address == 0 || !address.is_multiple_of(alignment) {
+        return None;
+    }
+    let count = dump.u64(address)?.checked_add(1)?;
+    if !count.is_power_of_two() || count > 1 << 16 {
+        return None;
+    }
+    let end = address.checked_add(alignment + count * stride)?;
+    dump.u64(end - 8)?;
+    Some(count)
 }
 
 fn find_pages(dump: &CoreDump) -> (Vec<Page>, Vec<u64>, usize) {

@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-const CACHE_FORMAT: &str = "rust-7";
+const CACHE_FORMAT: &str = "rust-8";
 
 pub fn convert_dump(
     source: &Path,

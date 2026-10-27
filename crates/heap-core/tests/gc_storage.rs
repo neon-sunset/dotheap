@@ -2,6 +2,70 @@ use heap_core::{analysis::HeapSnapshot, cache::CacheChoice, graph::AnalysisOptio
 use std::{path::Path, process::Command};
 
 #[test]
+fn sharded_allocator_work_chunks_are_classified_and_cached() {
+    let directory = tempfile::tempdir().unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/generate-compatibility-fixtures.py");
+    assert!(
+        Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .arg(script)
+            .arg(directory.path())
+            .arg("--sharded-gc-storage")
+            .status()
+            .unwrap()
+            .success()
+    );
+    for entry in std::fs::read_dir(directory.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "dmp") {
+            continue;
+        }
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let valid = name.ends_with("-valid");
+        for cached in [false, true] {
+            let snapshot = HeapSnapshot::open(
+                &path,
+                vec![],
+                None,
+                AnalysisOptions::default(),
+                CacheChoice::Folder(directory.path().join(format!("{name}-cache"))),
+                |_, _| {},
+            )
+            .unwrap();
+            assert_eq!(snapshot.from_cache, cached, "{name}");
+            assert_eq!(snapshot.heap.count(), 0, "{name}");
+            let totals = snapshot.totals();
+            assert_eq!(
+                totals.gc_storage,
+                if valid { 2_060_264 } else { 0 },
+                "{name}"
+            );
+            assert_eq!(
+                totals.unparsed,
+                if valid { 0 } else { 502 * 4096 },
+                "{name}"
+            );
+            assert_eq!(totals.free, if valid { 0 } else { 4072 }, "{name}");
+            assert_eq!(
+                snapshot.heap.regions[0].gc_storage.as_deref(),
+                valid.then_some("mark work chunks"),
+                "{name}"
+            );
+            assert_eq!(snapshot.satori_region_kinds().unwrap()[1], "free", "{name}");
+            assert_eq!(
+                totals.gc_storage
+                    + totals.unparsed
+                    + totals.free
+                    + totals.committed_unused
+                    + totals.headers,
+                totals.committed,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn gc_storage_is_separate_from_free_space_and_unknown_data() {
     let directory = tempfile::tempdir().unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
