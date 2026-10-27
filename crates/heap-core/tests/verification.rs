@@ -8,6 +8,7 @@ use std::{path::Path, process::Command};
 struct Case {
     name: String,
     expected: Option<(String, String, u64)>,
+    objects: Option<usize>,
 }
 
 #[test]
@@ -28,7 +29,7 @@ fn corrupted_heaps_and_valid_controls() {
             .unwrap();
     for case in cases {
         let path = temporary.path().join(format!("{}.dmp", case.name));
-        let result = verify_file(&path, |_, _| {}).unwrap();
+        let result = verify_file(&path, |_, _| {}).unwrap_or_else(|e| panic!("{}: {e}", case.name));
         if let Some((kind, structure, address)) = case.expected {
             if kind == "MissingMemory" {
                 assert_eq!(result.invalid, 0, "{}: {result:?}", case.name);
@@ -50,7 +51,63 @@ fn corrupted_heaps_and_valid_controls() {
                 "{}: {result:?}",
                 case.name
             );
-            assert!(result.objects >= 3, "{}: {result:?}", case.name);
+            if let Some(objects) = case.objects {
+                assert_eq!(result.objects, objects, "{}: {result:?}", case.name);
+                let cache = temporary.path().join(format!("{}-cache", case.name));
+                for cached in [false, true] {
+                    let snapshot = HeapSnapshot::open(
+                        &path,
+                        vec![],
+                        None,
+                        AnalysisOptions::default(),
+                        CacheChoice::Folder(cache.clone()),
+                        |_, _| {},
+                    )
+                    .unwrap();
+                    assert_eq!(snapshot.from_cache, cached, "{}", case.name);
+                    assert_eq!(snapshot.heap.count(), 1, "{}", case.name);
+                    let region = &snapshot.heap.regions[0];
+                    let end = snapshot.heap.addresses[0] + snapshot.heap.size(0);
+                    assert_eq!(region.used, end, "{}", case.name);
+                    assert!(!region.walk_stopped, "{}", case.name);
+                    let totals = snapshot.totals();
+                    assert_eq!(totals.unparsed, 0, "{}", case.name);
+                    assert_eq!(
+                        totals.committed_unused,
+                        region.committed - end,
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(
+                        totals.headers
+                            + totals.dead()
+                            + totals.live
+                            + totals.free
+                            + totals.committed_unused,
+                        totals.committed,
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(
+                        snapshot
+                            .granule_map()
+                            .iter()
+                            .flatten()
+                            .map(|g| g.used as u64)
+                            .sum::<u64>(),
+                        totals.used,
+                        "{}",
+                        case.name
+                    );
+                    assert!(
+                        snapshot.verification_check().unwrap().findings.is_empty(),
+                        "{}",
+                        case.name
+                    );
+                }
+            } else {
+                assert!(result.objects >= 3, "{}: {result:?}", case.name);
+            }
         }
         if case.name.ends_with("many-bad-refs") {
             assert_eq!(result.invalid, 1300);

@@ -109,7 +109,7 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "dotheap"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "heap-core",
  "libc",
@@ -181,14 +181,14 @@ dependencies = [
 
 [[package]]
 name = "heap-bridge"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "heap-core",
 ]
 
 [[package]]
 name = "heap-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "bytemuck",
  "cpp_demangle",
