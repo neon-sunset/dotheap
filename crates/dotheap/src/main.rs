@@ -280,14 +280,14 @@ fn verification_output(result: &heap_core::verification::HeapVerification, limit
 }
 
 fn cache_command(arguments: &Arguments) -> Result<Value, CliError> {
-    let mut entries = cache::entries(true);
+    let mut entries = cache::analysis_entries(true);
     if let Some(what) = arguments.value("--delete") {
         let chosen: Vec<_> = entries
             .iter()
             .filter(|e| {
                 what == "all"
                     || what == "missing" && e.dump_exists == Some(false)
-                    || e.directory.file_name().is_some_and(|n| n == what)
+                    || e.directories[0].file_name().is_some_and(|n| n == what)
             })
             .collect();
         if !["all", "missing"].contains(&what) && chosen.is_empty() {
@@ -307,7 +307,7 @@ fn cache_command(arguments: &Arguments) -> Result<Value, CliError> {
             chosen.len(),
             size(chosen.iter().map(|e| e.bytes).sum())
         );
-        entries = cache::entries(true);
+        entries = cache::analysis_entries(true);
     }
     let other = [
         ("live", "dumps captured from running processes"),
@@ -340,7 +340,7 @@ fn cache_command(arguments: &Arguments) -> Result<Value, CliError> {
                     (
                         "folder",
                         text(
-                            e.directory
+                            e.directories[0]
                                 .file_name()
                                 .unwrap_or_default()
                                 .to_string_lossy(),

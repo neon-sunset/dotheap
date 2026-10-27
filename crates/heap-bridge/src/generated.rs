@@ -33,8 +33,13 @@ pub unsafe extern "C" fn dh_AsyncAnalysis_report(pointer: *const c_void) -> *con
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dh_CacheEntry_directory(pointer: *const c_void) -> *const c_void {
-    unsafe { (&(*pointer.cast::<CacheEntry>()).directory as *const PathBuf).cast() }
+pub unsafe extern "C" fn dh_CacheEntry_directories(pointer: *const c_void) -> *const c_void {
+    unsafe { (&(*pointer.cast::<CacheEntry>()).directories as *const Vec<PathBuf>).cast() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_read_Vec_PathBuf(pointer: *const c_void) -> Slice {
+    unsafe { Slice::new(&*pointer.cast::<Vec<PathBuf>>()) }
 }
 
 #[unsafe(no_mangle)]
@@ -64,6 +69,16 @@ pub unsafe extern "C" fn dh_read_Option_PathBuf(pointer: *const c_void) -> *cons
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_CacheEntry_bytes(pointer: *const c_void) -> u64 {
     unsafe { (*pointer.cast::<CacheEntry>()).bytes }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_CacheEntry_dump_bytes(pointer: *const c_void) -> u64 {
+    unsafe { (*pointer.cast::<CacheEntry>()).dump_bytes }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_CacheEntry_captured(pointer: *const c_void) -> bool {
+    unsafe { (*pointer.cast::<CacheEntry>()).captured }
 }
 
 #[unsafe(no_mangle)]
@@ -5572,6 +5587,17 @@ pub unsafe extern "C" fn dh_remove_cache(entry: *const c_void) -> Outcome {
     unsafe {
         ffi::call(|| {
             Ok(Owned::new(crate::system::remove_cache(
+                &*entry.cast::<CacheEntry>(),
+            )?))
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_remove_captured_dump(entry: *const c_void) -> Outcome {
+    unsafe {
+        ffi::call(|| {
+            Ok(Owned::new(crate::system::remove_captured_dump(
                 &*entry.cast::<CacheEntry>(),
             )?))
         })

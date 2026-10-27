@@ -43,7 +43,7 @@ struct DotheapApp: App {
             ViewerCommands()
             HistoryCommands()
             HelpCommands()
-            CacheCommands()
+            CacheCommands(windows: windows)
         }
         Window("About Dotheap", id: "about") {
             AboutView()

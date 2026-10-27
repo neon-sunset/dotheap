@@ -108,6 +108,10 @@ pub fn remove_cache(entry: &CacheEntry) -> Result<()> {
     Ok(heap_core::cache::remove(entry)?)
 }
 
+pub fn remove_captured_dump(entry: &CacheEntry) -> Result<()> {
+    Ok(heap_core::cache::remove_captured_dump(entry)?)
+}
+
 pub fn cache_root() -> String {
     heap_core::cache::root().to_string_lossy().into_owned()
 }

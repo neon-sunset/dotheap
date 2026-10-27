@@ -10,12 +10,15 @@ typedef struct { void *context; void (*update)(void *, DHSlice, double); bool (*
 DHSlice dh_read_String(const void * pointer);
 const void * dh_AsyncAnalysis_graphs(const void * pointer);
 const void * dh_AsyncAnalysis_report(const void * pointer);
-const void * dh_CacheEntry_directory(const void * pointer);
+const void * dh_CacheEntry_directories(const void * pointer);
+DHSlice dh_read_Vec_PathBuf(const void * pointer);
 DHSlice dh_read_PathBuf(const void * pointer);
 const void * dh_CacheEntry_name(const void * pointer);
 const void * dh_CacheEntry_dump_path(const void * pointer);
 const void * dh_read_Option_PathBuf(const void * pointer);
 uint64_t dh_CacheEntry_bytes(const void * pointer);
+uint64_t dh_CacheEntry_dump_bytes(const void * pointer);
+bool dh_CacheEntry_captured(const void * pointer);
 double dh_CacheEntry_last_opened(const void * pointer);
 bool dh_CacheEntry_processed(const void * pointer);
 const void * dh_CacheEntry_dump_exists(const void * pointer);
@@ -889,6 +892,7 @@ DHOutcome dh_write_runtime_dump(const void * process, DHSlice path, DHProgress p
 DHOutcome dh_cache_entries(bool measure);
 DHSlice dh_read_Vec_CacheEntry(const void * pointer);
 DHOutcome dh_remove_cache(const void * entry);
+DHOutcome dh_remove_captured_dump(const void * entry);
 DHOutcome dh_cache_root(void);
 uint64_t dh_disk_bytes(DHSlice path);
 DHOutcome dh_dump_next_to_smaps(DHSlice path);
