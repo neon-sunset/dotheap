@@ -140,8 +140,8 @@ final class WindowTests: XCTestCase {
         }
         let remaining = try await loaded(second, windows: windows)
         let entries = CacheChoice.entries(measure: false)
-        let a = try XCTUnwrap(entries.first { $0.directory == oldSnapshot?.cacheDirectory })
-        let b = try XCTUnwrap(entries.first { $0.directory == remaining.snapshot?.cacheDirectory })
+        let a = try XCTUnwrap(entries.first { $0.directories.contains(oldSnapshot?.cacheDirectory ?? "") })
+        let b = try XCTUnwrap(entries.first { $0.directories.contains(remaining.snapshot?.cacheDirectory ?? "") })
         XCTAssertTrue(windows.isOpen(a))
         XCTAssertTrue(windows.isOpen(b))
 
@@ -168,7 +168,7 @@ final class WindowTests: XCTestCase {
         let window = window("reference-rooted", windows: windows, delegate: delegate)
         defer { close(window) }
         let session = try await loaded(window, windows: windows)
-        let entry = try XCTUnwrap(CacheChoice.entries(measure: false).first { $0.directory == session.snapshot?.cacheDirectory })
+        let entry = try XCTUnwrap(CacheChoice.entries(measure: false).first { $0.directories.contains(session.snapshot?.cacheDirectory ?? "") })
         session.snapshot = nil
         session.loading = true
         XCTAssertTrue(windows.isOpen(entry))

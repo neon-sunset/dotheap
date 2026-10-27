@@ -39,13 +39,12 @@ struct RecentDumps: View {
         }
         .frame(width: 560)
         .task(id: session.cacheChanges) {
-            entries = await Task.detached { CacheChoice.entries(measure: false).filter { $0.dumpExists == true } }.value
+            entries = await Task.detached { CacheChoice.entries(measure: false).filter { $0.dumpExists == true && $0.lastOpened > 0 } }.value
         }
     }
 }
 
-/// The cache folder: each processed dump's folder with its disk space, whether the dump is still where it was opened,
-/// and buttons that delete folders.
+/// Captured dumps and their analysis caches.
 struct CacheView: View {
     @Environment(ViewerWindows.self) private var windows
     @State private var changes = 0
@@ -54,30 +53,46 @@ struct CacheView: View {
     @State private var selection = Set<String>()
     @State private var order = [KeyPathComparator(\CacheEntry.lastOpened, order: .reverse)]
     @State private var confirmAll = false
+    @State private var confirmDumps = false
+    @State private var pendingDumps: [CacheEntry] = []
+    @State private var deleting = false
     @State private var error: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let entries {
-                let total = entries.reduce(0) { $0 + $1.bytes } + others.reduce(0) { $0 + $1.bytes }
+                let total = entries.reduce(0) { $0 + $1.bytes + $1.dumpBytes } + others.reduce(0) { $0 + $1.bytes }
                 HStack(alignment: .firstTextBaseline) {
                     Text(Format.mb(total)).font(.title2.weight(.semibold).monospacedDigit())
                     Text("in \(CacheChoice.root)").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     Spacer()
                     Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: CacheChoice.root)]) }
                 }
-                Text("A dump whose folder is deleted is processed again when it opens next.")
+                Text("Clearing analysis keeps the dump files.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Table(entries.sorted(using: order), selection: $selection, sortOrder: $order) {
-                    TableColumn("Dump", value: \CacheEntry.name) { e in Text(e.name).help(e.dumpPath ?? "") }
-                    TableColumn("Where it was opened", value: \CacheEntry.dumpFolder) { e in
+                    TableColumn("Dump", value: \CacheEntry.name) { e in
+                        Text(e.name).help(e.dumpPath ?? "")
+                            .contextMenu {
+                                if let path = e.dumpExists == true ? e.dumpPath : e.directories.first {
+                                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+                                }
+                            }
+                    }
+                    TableColumn("Location", value: \CacheEntry.dumpFolder) { e in
                         Text(e.dumpFolder).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                     TableColumn("Dump file", value: \CacheEntry.dumpStatus) { e in
                         Text(e.dumpStatus).foregroundStyle(e.dumpExists == false ? Palette.dead : .secondary)
-                    }.width(min: 80, ideal: 120)
-                    TableColumn("Disk space", value: \CacheEntry.bytes) { e in Text(Format.mb(e.bytes)).monospacedDigit() }.width(min: 70, ideal: 90)
-                    TableColumn("Last opened", value: \CacheEntry.lastOpened) { e in Text(e.openedDate, format: .relative(presentation: .named)) }.width(min: 80, ideal: 110)
+                    }.width(min: 80, ideal: 110, max: 120)
+                    TableColumn("Dump size", value: \CacheEntry.dumpBytes) { e in
+                        Text(e.captured ? Format.mb(e.dumpBytes) : "—").monospacedDigit()
+                    }.width(min: 70, ideal: 80, max: 90)
+                    TableColumn("Analysis", value: \CacheEntry.bytes) { e in Text(Format.mb(e.bytes)).monospacedDigit() }.width(min: 70, ideal: 80, max: 90)
+                    TableColumn("Last opened", value: \CacheEntry.lastOpened) { e in
+                        if e.lastOpened > 0 { Text(e.openedDate, format: .relative(presentation: .named)) }
+                        else { Text("Not opened").foregroundStyle(.secondary) }
+                    }.width(min: 80, ideal: 100, max: 110)
                 }
                 .frame(minHeight: 200)
                 ForEach(others, id: \.name) { o in
@@ -90,25 +105,45 @@ struct CacheView: View {
                     .font(.callout)
                 }
                 HStack {
-                    let missing = entries.filter { $0.dumpExists == false && !isOpen($0) }
-                    Button("Delete Selected") { delete(entries.filter { selection.contains($0.id) && !isOpen($0) }) }
-                        .disabled(!entries.contains { selection.contains($0.id) && !isOpen($0) })
-                    Button("Delete Folders of Moved or Deleted Dumps (\(Format.mb(missing.reduce(0) { $0 + $1.bytes })))") { delete(missing) }
-                        .disabled(missing.isEmpty)
+                    let available = entries.filter { !$0.directories.isEmpty && !isOpen($0) }
+                    let selected = available.filter { selection.contains($0.id) }
+                    let missing = available.filter { $0.dumpExists == false }
+                    let captures = entries.filter { $0.captured && selection.contains($0.id) && !isOpen($0) }
+                    Menu("Clear Analysis") {
+                        Button("Selected (\(Format.mb(selected.reduce(0) { $0 + $1.bytes })))") { delete(selected) }
+                            .disabled(selected.isEmpty)
+                        Button("Missing Dumps (\(Format.mb(missing.reduce(0) { $0 + $1.bytes })))") { delete(missing) }
+                            .disabled(missing.isEmpty)
+                        Divider()
+                        Button("All…") { confirmAll = true }
+                    }
+                    .fixedSize().disabled(available.isEmpty || deleting)
+                    Button("Delete Captured Dumps…", role: .destructive) {
+                        pendingDumps = captures
+                        confirmDumps = true
+                    }.disabled(captures.isEmpty || deleting)
                     Spacer()
-                    Button("Delete All…") { confirmAll = true }.disabled(entries.allSatisfy(isOpen))
+                    if deleting { ProgressView().controlSize(.small) }
+                    Button("Refresh") { changes += 1 }.disabled(deleting)
                 }
                 if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             } else {
-                ProgressView("Measuring the cache folder").frame(maxWidth: .infinity, maxHeight: .infinity)
+                ProgressView("Calculating sizes…").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .padding(16)
         .frame(minWidth: 760, minHeight: 420)
-        .confirmationDialog("Delete the folders of all dumps?", isPresented: $confirmAll) {
-            Button("Delete All", role: .destructive) { delete((entries ?? RustArray()).filter { !isOpen($0) }) }
+        .confirmationDialog("Clear all cached analysis?", isPresented: $confirmAll) {
+            Button("Clear All Analysis", role: .destructive) { delete((entries ?? RustArray()).filter { !$0.directories.isEmpty }) }
         } message: {
-            Text("Each dump is processed again when it opens next. Folders of open dumps stay.")
+            Text("Dump files are kept. Open dumps are skipped.")
+        }
+        .confirmationDialog("Delete \(pendingDumps.count) captured \(pendingDumps.count == 1 ? "dump" : "dumps")?", isPresented: $confirmDumps) {
+            Button("Delete", role: .destructive) {
+                delete(pendingDumps, captured: true)
+            }
+        } message: {
+            Text("Permanently deletes the dumps and their analysis and residency files.")
         }
         .task(id: windows.cacheChanges + [changes]) { await load() }
     }
@@ -117,37 +152,63 @@ struct CacheView: View {
 
     private func load() async {
         let (list, other) = await Task.detached {
-            (CacheChoice.entries(), CacheChoice.otherFolders.sorted { $0.key < $1.key }.map { ($0.key, $0.value, CacheChoice.diskBytes(CacheChoice.root + "/" + $0.key)) })
+            let list = CacheChoice.entries()
+            let capturedBytes = list.reduce(UInt64(0)) { $0 + $1.dumpBytes }
+            let other = CacheChoice.otherFolders.sorted { $0.key < $1.key }.compactMap { name, holds -> (String, String, UInt64)? in
+                let bytes = CacheChoice.diskBytes(CacheChoice.root + "/" + name)
+                if name == "live" {
+                    let remaining = bytes - min(bytes, capturedBytes)
+                    return remaining > 0 ? ("Other capture files", "residency files and unfinished dumps", remaining) : nil
+                }
+                return (name.capitalized, holds, bytes)
+            }
+            return (list, other)
         }.value
+        guard !Task.isCancelled else { return }
         entries = list
         others = other.map { (name: $0.0, holds: $0.1, bytes: $0.2) }
     }
 
-    private func delete(_ list: some Sequence<CacheEntry>) {
+    private func delete(_ list: [CacheEntry], captured: Bool = false) {
+        guard !deleting else { return }
+        let list = list.filter { !isOpen($0) }
         error = nil
-        for e in list {
-            do { try CacheChoice.remove(e) } catch { self.error = "cannot delete \(e.directory): \(analysisErrorMessage(error))" }
+        deleting = true
+        Task {
+            let errors = await Task.detached {
+                list.compactMap { entry -> String? in
+                    do {
+                        if captured { try CacheChoice.removeCapturedDump(entry) }
+                        else { try CacheChoice.remove(entry) }
+                        return nil
+                    } catch { return "Cannot delete \(entry.name): \(analysisErrorMessage(error))" }
+                }
+            }.value
+            error = errors.isEmpty ? nil : errors.joined(separator: "\n")
+            selection = []
+            deleting = false
+            changes += 1
+            windows.cacheChanged()
         }
-        selection = []
-        changes += 1
     }
 }
 
 private extension CacheEntry {
-    var dumpFolder: String { dumpPath.map { ($0 as NSString).deletingLastPathComponent } ?? "not recorded" }
-    var dumpStatus: String { dumpExists.map { $0 ? "there" : "moved or deleted" } ?? "-" }
+    var dumpFolder: String { dumpPath.map { ($0 as NSString).deletingLastPathComponent } ?? "Unknown" }
+    var dumpStatus: String { captured ? "Captured" : dumpExists.map { $0 ? "Available" : "Missing" } ?? "Unknown" }
 }
 
 /// File menu items for the cache folders: Open Recent and the Cache window.
 struct CacheCommands: Commands {
+    let windows: ViewerWindows
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(Session.self) private var session
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
-            let _ = session?.cacheChanges
+            let _ = windows.cacheChanges
             Menu("Open Recent") {
-                ForEach(CacheChoice.entries(measure: false).filter { $0.dumpExists == true }.prefix(10)) { e in
+                ForEach(CacheChoice.entries(measure: false).filter { $0.dumpExists == true && $0.lastOpened > 0 }.prefix(10)) { e in
                     Button(e.name) {
                         if let path = e.dumpPath { OpenPanel.open(URL(fileURLWithPath: path), in: session, openWindow: openWindow) }
                     }

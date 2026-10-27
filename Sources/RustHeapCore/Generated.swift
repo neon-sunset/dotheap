@@ -27,6 +27,8 @@ public struct AsyncAnalysis: @unchecked Sendable, Equatable {
 
 func read_PathBuf(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> String { readString(dh_read_PathBuf(pointer)) }
 
+func read_Vec_PathBuf(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> RustArray<String> { RustArray(dh_read_Vec_PathBuf(pointer), owner: owner, read: read_PathBuf) }
+
 func read_Option_PathBuf(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> String? { dh_read_Option_PathBuf(pointer).map { read_PathBuf($0, owner) } }
 
 func read_bool(_ pointer: UnsafeRawPointer, _ owner: RustOwner) -> Bool { pointer.load(as: Bool.self) }
@@ -37,19 +39,23 @@ public struct CacheEntry: @unchecked Sendable, Equatable {
     let _pointer: UnsafeRawPointer
     let _owner: RustOwner
     init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
-    public var directory: String { withExtendedLifetime(_owner) { read_PathBuf(dh_CacheEntry_directory(_pointer)!, _owner) } }
+    public var directories: RustArray<String> { withExtendedLifetime(_owner) { read_Vec_PathBuf(dh_CacheEntry_directories(_pointer)!, _owner) } }
     public var name: String { withExtendedLifetime(_owner) { read_String(dh_CacheEntry_name(_pointer)!, _owner) } }
     public var dumpPath: String? { withExtendedLifetime(_owner) { read_Option_PathBuf(dh_CacheEntry_dump_path(_pointer)!, _owner) } }
     public var bytes: UInt64 { withExtendedLifetime(_owner) { dh_CacheEntry_bytes(_pointer) } }
+    public var dumpBytes: UInt64 { withExtendedLifetime(_owner) { dh_CacheEntry_dump_bytes(_pointer) } }
+    public var captured: Bool { withExtendedLifetime(_owner) { dh_CacheEntry_captured(_pointer) } }
     public var lastOpened: Double { withExtendedLifetime(_owner) { dh_CacheEntry_last_opened(_pointer) } }
     public var processed: Bool { withExtendedLifetime(_owner) { dh_CacheEntry_processed(_pointer) } }
     public var dumpExists: Bool? { withExtendedLifetime(_owner) { read_Option_bool(dh_CacheEntry_dump_exists(_pointer)!, _owner) } }
     public static func == (lhs: Self, rhs: Self) -> Bool {
         if lhs._pointer == rhs._pointer { return true }
-        return lhs.directory == rhs.directory &&
+        return lhs.directories == rhs.directories &&
             lhs.name == rhs.name &&
             lhs.dumpPath == rhs.dumpPath &&
             lhs.bytes == rhs.bytes &&
+            lhs.dumpBytes == rhs.dumpBytes &&
+            lhs.captured == rhs.captured &&
             lhs.lastOpened == rhs.lastOpened &&
             lhs.processed == rhs.processed &&
             lhs.dumpExists == rhs.dumpExists
@@ -3042,6 +3048,13 @@ public func cacheEntries(measure: Bool) -> RustArray<CacheEntry> {
 public func removeCache(entry: CacheEntry) throws -> Void {
     return try withExtendedLifetime((entry)) {
         let result = try take(dh_remove_cache(entry._pointer))
+        return withExtendedLifetime(result) { read_(result.pointer, result) }
+    }
+}
+
+public func removeCapturedDump(entry: CacheEntry) throws -> Void {
+    return try withExtendedLifetime((entry)) {
+        let result = try take(dh_remove_captured_dump(entry._pointer))
         return withExtendedLifetime(result) { read_(result.pointer, result) }
     }
 }

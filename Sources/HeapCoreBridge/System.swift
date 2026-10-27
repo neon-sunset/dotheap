@@ -5,10 +5,11 @@ public enum CacheChoice: Sendable, Equatable {
     case automatic, rebuild
     case folder(String)
     public static var root: String { RustHeapCore.cacheRoot() }
-    public static let otherFolders = ["symbols": "debug files of .NET runtimes", "live": "dumps that dotheap wrote"]
+    public static let otherFolders = ["symbols": ".NET runtime debug symbols", "live": "captured dumps"]
     public static func entries(measure: Bool = true) -> RustArray<CacheEntry> { RustHeapCore.cacheEntries(measure: measure) }
     public static func diskBytes(_ path: String) -> UInt64 { RustHeapCore.diskBytes(path: path) }
     public static func remove(_ entry: CacheEntry) throws { try RustHeapCore.removeCache(entry: entry) }
+    public static func removeCapturedDump(_ entry: CacheEntry) throws { try RustHeapCore.removeCapturedDump(entry: entry) }
 }
 
 public func analysisErrorMessage(_ error: Error) -> String {
@@ -66,7 +67,7 @@ extension Residency {
 }
 
 extension CacheEntry: Identifiable {
-    public var id: String { directory }
+    public var id: String { dumpPath ?? directories.first ?? name }
     public var openedDate: Date { Date(timeIntervalSince1970: lastOpened) }
 }
 

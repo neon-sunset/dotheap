@@ -9,8 +9,7 @@ final class ViewerWindows {
     private var revision = 0
 
     var cacheChanges: [Int] {
-        _ = revision
-        return sessions.objectEnumerator()?.allObjects.compactMap { ($0 as? Session)?.cacheChanges } ?? []
+        [revision] + (sessions.objectEnumerator()?.allObjects.compactMap { ($0 as? Session)?.cacheChanges } ?? [])
     }
 
     func register(_ session: Session, for window: NSWindow) {
@@ -25,11 +24,18 @@ final class ViewerWindows {
 
     func session(for window: NSWindow) -> Session? { sessions.object(forKey: window) }
 
+    func cacheChanged() {
+        for case let session as Session in sessions.objectEnumerator()?.allObjects ?? [] {
+            session.cacheChanges += 1
+        }
+        revision += 1
+    }
+
     func isOpen(_ entry: CacheEntry) -> Bool {
         _ = revision
         return sessions.objectEnumerator()?.allObjects.contains {
             guard let session = $0 as? Session else { return false }
-            if session.snapshot?.cacheDirectory == entry.directory { return true }
+            if let directory = session.snapshot?.cacheDirectory, entry.directories.contains(directory) { return true }
             guard let dump = session.dumpPath, let path = entry.dumpPath else { return false }
             return URL(fileURLWithPath: dump).resolvingSymlinksInPath() == URL(fileURLWithPath: path).resolvingSymlinksInPath()
         } ?? false
