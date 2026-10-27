@@ -52,6 +52,53 @@ def gc_storage(path, layout, kind):
     path.write_bytes(data)
 
 
+def sharded_gc_storage(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    cases = [(1, 0, "valid")] + [(4, i, "valid") for i in range(4)]
+    cases += [(4, 3, kind) for kind in (
+        "empty", "bad-mask", "overflow-mask", "bad-queue-mask", "bad-queue-kind", "truncated", "bad-head")]
+    for architecture, alignment in ((62, 64), (183, 128)):
+        for count, occupied, kind in cases:
+            path = folder / f"{architecture}-{count}-{occupied}-{kind}.dmp"
+            gc_storage(path, "current", "work-chunks")
+            data = bytearray(path.read_bytes())
+            page, first = contract.PAGE, contract.FIRST
+
+            def write(address, value, fmt="Q"):
+                struct.pack_into("<" + fmt, data, 8192 + address - page, value)
+
+            struct.pack_into("<H", data, 18, architecture)
+            heap, pool = page + 0x10000, page + 0x12000
+            for i in range(9):
+                queue = page + 0x15000 + i * 0x1000
+                shards = count if i == 0 else 1
+                write(heap + 8 + i * 8, queue)
+                write(queue, shards - 1)
+                if i == 0:
+                    shard = queue + alignment + occupied * 2 * alignment
+                    free = contract.REGION + (1 << 21)
+                    write(shard + alignment, free)
+                    write(shard + alignment + 8, free)
+                    write(shard + alignment + 16, 1)
+                    write(free + contract.OFFSETS["current"][5], shard)
+            write(pool, count - 1)
+            write(pool + 128 + occupied * 128, 0 if kind == "empty" else first)
+            if kind == "bad-mask":
+                write(pool, 2)
+            elif kind == "overflow-mask":
+                write(pool, (1 << 64) - 1)
+            elif kind == "bad-queue-mask":
+                write(page + 0x16000, 2)
+            elif kind == "bad-queue-kind":
+                write(page + 0x15000 + alignment + 2 * alignment, 1, "I")
+            elif kind == "truncated":
+                write(heap + 80, page + 0x40ff80)
+                write(page + 0x40ff80, count - 1)
+            elif kind == "bad-head":
+                write(pool + 128 + occupied * 128, first + 8)
+            path.write_bytes(data)
+
+
 def native_allocations(path):
     contract.core(path, refs={8: 1}, rooted=True)
     data = bytearray(path.read_bytes())
@@ -374,4 +421,7 @@ def coreclr(path, architecture, mode):
 
 
 if __name__ == "__main__":
-    generate(Path(sys.argv[1]))
+    if "--sharded-gc-storage" in sys.argv[2:]:
+        sharded_gc_storage(Path(sys.argv[1]))
+    else:
+        generate(Path(sys.argv[1]))
