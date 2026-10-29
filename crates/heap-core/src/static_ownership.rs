@@ -472,8 +472,6 @@ impl OwnerTree {
                 n = p;
             }
         }
-        // Field references replace storage references, so any dominator child of a marked node can get a new dominator.
-        // Below those children the dominators do not change, and their subtrees stay collapsed.
         let frontier: BTreeSet<_> = marked
             .iter()
             .flat_map(|&n| base.children(n))

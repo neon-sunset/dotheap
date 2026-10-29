@@ -179,7 +179,6 @@ def static_fields(path, mode):
         struct.pack_into("<" + fmt, data, offset, value)
 
     if mode == "values":
-        # Each type's fields hold one object, and both objects reference a value that no field holds.
         value, leaf = contract.FIRST + 56, page + 0x2200
         put(leaf, 0x01000000, "I")
         put(leaf - 8, 1)

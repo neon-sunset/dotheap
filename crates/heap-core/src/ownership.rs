@@ -81,8 +81,6 @@ impl HeapSnapshot {
     pub fn ownership(&self) -> Result<Arc<OwnershipGraph>> {
         self.memo("ownership graph", || OwnershipGraph::open(self))
     }
-    /// The native allocations that store each GC handle slot. Handles to static field storage stay roots: the runtime
-    /// keeps static fields alive, not the native structure that stores their handle.
     pub(crate) fn handle_holders(&self, native: &NativeGraph) -> Result<BTreeMap<u64, Vec<i32>>> {
         let statics = self.statics_arrays()?;
         let static_slots: HashSet<_> = self
