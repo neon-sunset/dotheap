@@ -170,13 +170,28 @@ def native_allocations(path):
 
 def static_fields(path, mode):
     contract.core(path, base=24, component=8, length=4, series=((16, 0),),
-                  refs={16: 1, 24: 2, 32: 1, 40: 2}, rooted=True)
+                  refs={16: 1, 24: 1, 32: 2, 40: 2} if mode == "values" else {16: 1, 24: 2, 32: 1, 40: 2}, rooted=True)
     data = bytearray(path.read_bytes())
     page, image = contract.PAGE, contract.IMAGE
 
     def put(address, value, fmt="Q"):
         offset = 4096 + address - image if image <= address < image + 4096 else 8192 + address - page
         struct.pack_into("<" + fmt, data, offset, value)
+
+    if mode == "values":
+        value, leaf = contract.FIRST + 56, page + 0x2200
+        put(leaf, 0x01000000, "I")
+        put(leaf - 8, 1)
+        put(leaf - 16, 8)
+        put(leaf - 24, -16, "q")
+        put(value, leaf)
+        put(value + 24, page + 0x2100)
+        put(value + 32, 32, "I")
+        for holder in (contract.FIRST + 136, contract.FIRST + 160):
+            put(holder + 8, value)
+        offsets = contract.OFFSETS["current"]
+        put(contract.REGION + offsets[6], 56 + 72)
+        put(contract.REGION + offsets[7], 4, "I")
 
     if mode == "owned":
         owner, target = contract.FIRST + 136, contract.FIRST + 160
@@ -208,8 +223,8 @@ def static_fields(path, mode):
     put(contract.MT + 24, page + 0x5000)
     put(contract.MT + 48, page + 0x2200)
     put(page + 0x5048, page + 0x5100)
-    put(page + 0x5050, 2 if mode == "types" else 1, "I")
-    for i in range(2 if mode == "types" else 1):
+    put(page + 0x5050, 2 if mode in ("types", "values") else 1, "I")
+    for i in range(2 if mode in ("types", "values") else 1):
         mt, aux = page + 0x6000 + i * 0x200, page + 0x7000 + i * 0x100
         put(page + 0x5100 + i * 8, mt)
         put(mt + 8, 2 | ((i + 1) << 8), "I")
@@ -266,7 +281,7 @@ def generate(folder):
     add("empty-struct-array", base=24, component=16, series=(), offset=16, runs=((1, 8),))
     (folder / "expected.json").write_text(json.dumps(cases, indent=2) + "\n")
 
-    for mode in ("fields", "types", "unnamed", "owned"):
+    for mode in ("fields", "types", "unnamed", "owned", "values"):
         static_fields(folder / f"static-shared-{mode}.dmp", mode)
 
     references = bytearray((folder / "reference-array-rooted.dmp").read_bytes())

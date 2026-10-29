@@ -81,8 +81,30 @@ impl HeapSnapshot {
     pub fn ownership(&self) -> Result<Arc<OwnershipGraph>> {
         self.memo("ownership graph", || OwnershipGraph::open(self))
     }
+    pub(crate) fn handle_holders(&self, native: &NativeGraph) -> Result<BTreeMap<u64, Vec<i32>>> {
+        let statics = self.statics_arrays()?;
+        let static_slots: HashSet<_> = self
+            .graph
+            .handles
+            .iter()
+            .filter(|h| h.target.is_some_and(|t| statics.contains(&t)))
+            .map(|h| h.slot)
+            .collect();
+        let mut holders = BTreeMap::<u64, Vec<i32>>::new();
+        for (&c, slots) in &native.handle_references {
+            if native.is_used(c as usize) {
+                for &slot in slots.iter().filter(|s| !static_slots.contains(s)) {
+                    let list = holders.entry(slot).or_default();
+                    if !list.contains(&c) {
+                        list.push(c);
+                    }
+                }
+            }
+        }
+        Ok(holders)
+    }
     pub fn type_retained(&self) -> Result<Arc<Vec<u64>>> {
-        self.saved("type retained with native memory v2", || {
+        self.saved("type retained with native memory v3", || {
             let graph = self.ownership()?;
             let mut retained = vec![0; self.heap.types.len()];
             let mut on_path = vec![0usize; retained.len()];
@@ -211,7 +233,7 @@ impl HeapSnapshot {
             Ok(list)
         };
         if v == 0 {
-            self.saved("ownership groups of the root v5", compute)
+            self.saved("ownership groups of the root v6", compute)
         } else {
             self.memo(format!("ownership groups {v}"), compute)
         }
@@ -228,7 +250,7 @@ impl OwnershipGraph {
         if let Some(dir) = &directory
             && let Ok(bytes) = std::fs::read(dir.join("manifest.json"))
             && let Ok(saved) = serde_json::from_slice::<OwnershipSaved>(&bytes)
-            && saved.format == 2
+            && saved.format == 3
             && let Ok(graph) = Self::from_saved(saved, &store)
         {
             return Ok(graph);
@@ -442,17 +464,7 @@ impl OwnershipGraph {
         let mut handle_predecessors = BTreeMap::<i32, Vec<i32>>::new();
         let mut held_native = HashSet::new();
         let mut held_elsewhere = HashSet::new();
-        let mut holders = BTreeMap::<u64, Vec<i32>>::new();
-        for (&c, slots) in &native.handle_references {
-            if native.is_used(c as usize) {
-                for &slot in slots {
-                    let list = holders.entry(slot).or_default();
-                    if !list.contains(&c) {
-                        list.push(c);
-                    }
-                }
-            }
-        }
+        let holders = s.handle_holders(&native)?;
         for h in &s.graph.handles {
             if !handles::is_strong(h.kind) {
                 continue;
@@ -568,7 +580,7 @@ impl OwnershipGraph {
         }
         Ok(Self {
             saved: OwnershipSaved {
-                format: 2,
+                format: 3,
                 source_names,
                 object_base,
                 chunk_base,
