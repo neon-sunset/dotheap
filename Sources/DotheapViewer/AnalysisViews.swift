@@ -54,7 +54,7 @@ struct NativeMemoryView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("By mapping kind").font(.title2.weight(.semibold))
                     if let residency {
-                        Text("Readable mapped memory in the dump, and the part of it that is resident per smaps, by what it holds.")
+                        Text("Readable mappings in the dump, grouped by kind. Resident is RSS per smaps; the rest is split into pages with data in the dump and zero pages.")
                             .font(.callout).foregroundStyle(.secondary)
                         let byKind = Dictionary(grouping: native.mappings, by: \.category)
                         let rss = byKind.mapValues { $0.reduce(0) { $0 + (residency.rss[$1.start] ?? 0) } }
@@ -63,9 +63,9 @@ struct NativeMemoryView: View {
                         KindBars(rows: categories.map { ($0.name, $0.bytes, rss[$0.name] ?? 0, missing[$0.name] ?? 0) }, resident: true)
                     } else {
                         Text(!snapshot.dump.platform.isLinux
-                             ? "Readable mapped memory in the dump, by what it holds. Untouched stack and heap pages count here. See Residency for resident memory."
-                             : snapshot.smaps == nil ? "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. Add a residency file to measure RSS."
-                             : "Readable mapped memory in the dump, by what it holds. This is not RSS: untouched stack and heap pages count here. The residency file does not match the dump, so it is not used here.")
+                             ? "Readable mappings in the dump, grouped by kind. Untouched stack and heap pages count here. See Residency for resident memory."
+                             : snapshot.smaps == nil ? "Readable mappings in the dump, grouped by kind. This is not RSS: untouched stack and heap pages count here. Add a residency file to measure RSS."
+                             : "Readable mappings in the dump, grouped by kind. This is not RSS: untouched stack and heap pages count here. The residency file does not match the dump, so it is not used here.")
                             .font(.callout).foregroundStyle(.secondary)
                         KindBars(rows: categories.map { ($0.name, $0.bytes, 0, 0) }, resident: false)
                     }

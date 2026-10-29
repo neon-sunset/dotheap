@@ -98,3 +98,48 @@ fn static_owners_count_shared_values_once_without_changing_physical_retention() 
         assert_eq!(&*s.type_retained().unwrap(), &*retained);
     }
 }
+
+#[test]
+fn a_value_that_fields_of_two_types_reach_belongs_to_static_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../scripts/generate-compatibility-fixtures.py")
+            )
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let s = HeapSnapshot::open(
+        &dir.path().join("static-shared-values.dmp"),
+        vec![],
+        None,
+        AnalysisOptions::default(),
+        CacheChoice::None,
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(s.graph.live_count, 4);
+    let value = s.heap.object_at(s.heap.addresses[0] + 56).unwrap();
+    for managed_only in [false, true] {
+        let tree = s.owner_tree(managed_only).unwrap();
+        let mut pending = vec![tree.root];
+        let mut owner = None;
+        while let Some(id) = pending.pop() {
+            for child in tree.children(&s, id) {
+                if tree.entry(&s, child).unwrap().unwrap().object == Some(value) {
+                    owner = Some(tree.entry(&s, id).unwrap().unwrap().kind);
+                }
+                pending.push(child);
+            }
+        }
+        assert_eq!(
+            owner,
+            Some(OwnerKind::StaticFields),
+            "managed only: {managed_only}"
+        );
+    }
+}

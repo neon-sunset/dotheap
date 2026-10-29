@@ -185,28 +185,21 @@ impl<'a> Predecessors<'a> {
                     extra.entry(target as usize).or_default().push(source + 1);
                 }
             }
-            let targets: HashMap<_, _> = base
+            let holders = base.s.handle_holders(&native)?;
+            for h in base
                 .s
                 .graph
                 .handles
                 .iter()
                 .filter(|h| handles::is_strong(h.kind))
-                .filter_map(|h| {
-                    h.target
-                        .filter(|&i| base.s.graph.live[i] != 0)
-                        .map(|i| (h.slot, g.object_node(i)))
-                })
-                .collect();
-            for (&chunk, slots) in &native.handle_references {
-                if native.is_used(chunk as usize) {
-                    for slot in slots {
-                        if let Some(&target) = targets.get(slot) {
-                            extra
-                                .entry(target)
-                                .or_default()
-                                .push(g.chunk_node(chunk as usize));
-                        }
-                    }
+            {
+                if let Some(target) = h.target.filter(|&i| base.s.graph.live[i] != 0)
+                    && let Some(chunks) = holders.get(&h.slot)
+                {
+                    extra
+                        .entry(g.object_node(target))
+                        .or_default()
+                        .extend(chunks.iter().map(|&c| g.chunk_node(c as usize)));
                 }
             }
             Some(native)
@@ -479,8 +472,17 @@ impl OwnerTree {
                 n = p;
             }
         }
+        // Field references replace storage references, so any dominator child of a marked node can get a new dominator.
+        // Below those children the dominators do not change, and their subtrees stay collapsed.
+        let frontier: BTreeSet<_> = marked
+            .iter()
+            .flat_map(|&n| base.children(n))
+            .map(|&c| c as usize)
+            .filter(|c| !marked.contains(c))
+            .collect();
         let mut originals = vec![base.root()];
-        originals.extend(marked.into_iter().filter(|&n| n != base.root()));
+        originals.extend(marked.iter().copied().filter(|&n| n != base.root()));
+        originals.extend(frontier);
         let mut index: HashMap<_, _> = originals.iter().enumerate().map(|(i, &n)| (n, i)).collect();
         let mut graph = SmallGraph::default();
         let mut entries = Vec::new();
@@ -498,7 +500,6 @@ impl OwnerTree {
             weights[index[&p]].0 -= w.0;
             weights[index[&p]].1 -= w.1;
         }
-        // Collapse unchanged dominator subtrees. Only static storage, field targets and their ancestors need new dominators.
         let mut removed: HashSet<_> = bindings
             .iter()
             .map(|b| (base.object(b.1), base.object(b.2)))

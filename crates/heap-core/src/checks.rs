@@ -311,7 +311,7 @@ impl HeapSnapshot {
             });
             Ok(findings)
         };
-        self.saved("summary findings v5", compute)
+        self.saved("summary findings v6", compute)
     }
 
     pub fn field(&self, i: usize, name: &str) -> Option<FieldValue> {
