@@ -321,6 +321,8 @@ def generate(folder):
     for architecture in (62, 183):
         for mode in ("workstation-regions", "workstation-segments", "server-regions"):
             coreclr(folder / f"coreclr-{architecture}-{mode}.dmp", architecture, mode)
+        for name, address in (("below", 0x20000000), ("between", 0x40100000), ("above", 0x50000000)):
+            stack_roots(folder / f"stack-roots-{architecture}-{name}.dmp", architecture, address)
         for mode in ("regular", "large", "shared", "bad-backpointer", "missing-descriptor",
                      "unknown-thread", "null-locals", "overflow-locals", "ambiguous"):
             satori_thread(folder / f"satori-thread-{architecture}-{mode}.dmp", architecture, mode)
@@ -376,6 +378,32 @@ def satori_thread(path, architecture, mode):
     struct.pack_into("<H", data, 18, architecture)
     data[64:120] = contract.segment(4, 512, 0, len(notes))
     data[512:512 + len(notes)] = notes
+    path.write_bytes(data)
+
+
+def stack_roots(path, architecture, address):
+    coreclr(path, architecture, "workstation-segments")
+    data = bytearray(path.read_bytes())
+    stack = bytearray(4096)
+    struct.pack_into("<Q", stack, 256, contract.FIRST)
+    status = bytearray(336 if architecture == 62 else 392)
+    struct.pack_into("<I", status, 32, 1)
+    struct.pack_into("<Q", status, 112 + (19 if architecture == 62 else 31) * 8, address + 256)
+    files = struct.pack("<QQQQQ", 1, 4096, contract.IMAGE, contract.IMAGE + 4096, 0) + b"/fixture/libcoreclr.so\0"
+    notes = contract.note(b"CORE\0", 0x46494c45, files) + contract.note(b"CORE\0", 1, status)
+    segments = [(8192, contract.PAGE, len(data) - 8192)]
+    if contract.PAGE < address < contract.PAGE + segments[0][2]:
+        segments = [(8192, contract.PAGE, address - contract.PAGE),
+                    (8192 + address + 4096 - contract.PAGE, address + 4096,
+                     contract.PAGE + segments[0][2] - address - 4096)]
+    segments.append((len(data), address, len(stack)))
+    segments.sort(key=lambda segment: segment[1])
+    struct.pack_into("<H", data, 56, len(segments) + 2)
+    data[64:120] = contract.segment(4, 512, 0, len(notes))
+    for i, (offset, start, size) in enumerate(segments, 2):
+        data[64 + i * 56:120 + i * 56] = contract.segment(1, offset, start, size)
+    data[512:512 + len(notes)] = notes
+    data.extend(stack)
     path.write_bytes(data)
 
 
