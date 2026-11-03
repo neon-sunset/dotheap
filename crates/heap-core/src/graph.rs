@@ -849,7 +849,7 @@ impl<'a> Marker<'a> {
         for (i, seg) in dump.segments.iter().enumerate() {
             progress.portion(0.1, 0.8).items(i, dump.segments.len());
             if !seg.writable
-                || (seg.address < heap.high && seg.end() > heap.low)
+                || heap.owns_memory(seg.address, seg.end())
                 || dump.exited_thread_stacks.contains(&i)
             {
                 continue;
