@@ -50,12 +50,9 @@ _On Apple silicon macOS_, Dotheap uses kernel copy-on-write snapshots: the appli
 ## Install
 
 - **Apple silicon, macOS 15+:** `brew install --cask neon-sunset/tap/dotheap` installs the
-  precompiled CLI on your PATH and puts `Dotheap.app` in `/Applications`. No Xcode or Rust is
-  required. Use `brew upgrade --cask dotheap` to update both. To replace a source installation
-  of the same version, use `brew reinstall --cask dotheap`.
-  The cask preserves the ad-hoc signatures and debugger entitlements, and removes quarantine
-  from Dotheap so the CLI and Viewer can run immediately. Live capture still needs macOS
-  debugger access.
+  precompiled CLI on your PATH and puts `Dotheap.app` in `/Applications`.
+  Use `brew upgrade --cask dotheap` to update both. The CLI and Viewer can run immediately
+  after installation. Live process capture requires macOS debugger access.
   See [macOS distribution](docs/macos-distribution.md) for packaging and verification.
 - **Linux:** download a static x86_64 or aarch64 binary from the
   [releases page](https://github.com/neon-sunset/dotheap/releases). No runtime dependencies are required.
