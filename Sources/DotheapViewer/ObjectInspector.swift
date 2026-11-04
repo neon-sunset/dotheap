@@ -271,10 +271,9 @@ struct ObjectDetail: View {
     }
 
     private func group(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        SwiftUI.Section {
-            content()
-        } header: {
+        LazyVStack(alignment: .leading, spacing: 2) {
             Text(title).font(.subheadline.weight(.semibold)).padding(.top, 10).padding(.bottom, 2)
+            content()
         }
     }
 }

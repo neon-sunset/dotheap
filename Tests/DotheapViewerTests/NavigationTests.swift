@@ -158,6 +158,55 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(table.numberOfRows, count)
     }
 
+    @MainActor func testInspectorShowsEveryPathAndReferrerRow() async throws {
+        var cases = [(try snapshot("query-reference-array"), 0), (try snapshot("query-reference-array"), 1)]
+        let environment = ProcessInfo.processInfo.environment
+        if let path = environment["DOTHEAP_INSPECTOR_DUMP"],
+           let address = environment["DOTHEAP_INSPECTOR_OBJECT"].flatMap({ UInt64($0.replacingOccurrences(of: "0x", with: ""), radix: 16) }) {
+            let snapshot = try await Task.detached { try HeapSnapshot(path: path) }.value
+            cases.append((snapshot, try XCTUnwrap(snapshot.heap.object(containing: address))))
+        }
+        _ = NSApplication.shared
+        for (snapshot, object) in cases {
+            let model = try await Task.detached { try ObjectModel(snapshot, object) }.value
+            XCTAssertTrue(model.fields.allSatisfy { $0.target == nil })
+            XCTAssertNil(model.structElements)
+            XCTAssertFalse(model.path.isEmpty)
+            var objects = Array(model.path) + Array(model.referrers) + model.references.map(Int.init)
+            objects += model.referenceElements?.compactMap(\.target) ?? []
+            if let dominator = model.ownership?.dominator, case let .object(index) = dominator.node {
+                objects.append(index)
+            }
+            let expected = Dictionary(grouping: objects.map { snapshot.typeName(ofObject: $0) }, by: { $0 }).mapValues(\.count)
+            let host = NSHostingView(rootView: ObjectDetail(snapshot: snapshot, object: object).environment(Session()))
+            host.sizingOptions = []
+            host.safeAreaRegions = []
+            let height = CGFloat(max(1000, objects.count * 28 + 400))
+            let window = NSWindow(contentRect: NSRect(x: -4000, y: 0, width: 670, height: height),
+                                  styleMask: .borderless, backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.orderBack(nil)
+            defer { window.close() }
+            func names(_ view: NSView) -> [String] {
+                if let field = view as? TypeNameField, !field.isHiddenOrHasHiddenAncestor, field.bounds.width > 0 {
+                    return [field.name]
+                }
+                return view.subviews.flatMap(names)
+            }
+            let deadline = ContinuousClock.now + .seconds(3)
+            var actual: [String: Int] = [:]
+            repeat {
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                actual = Dictionary(grouping: names(host), by: { $0 }).mapValues(\.count)
+                if actual == expected { break }
+                try await Task.sleep(for: .milliseconds(20))
+            } while ContinuousClock.now < deadline
+            XCTAssertEqual(actual, expected, "Missing inspector links for \(Format.hex(model.address))")
+        }
+    }
+
     @MainActor func testPageObservesSessionAppearanceAndResize() async throws {
         let snapshot = try snapshot(), session = Session(), probe = Probe()
         let pages = PageContainer(), window = window(pages)
