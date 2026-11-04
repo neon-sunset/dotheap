@@ -34,8 +34,10 @@ CI and the release workflow run these checks before uploading the archives.
 ## Homebrew updates
 
 A version tag must match `Cargo.toml`, and CI must have passed on that commit.
-The release workflow creates a draft with all packages and `SHA256SUMS`. A manual
-workflow run uploads workflow artifacts.
+CI retains its tested binaries and macOS packages for 14 days. The release workflow
+uses those artifacts from a successful run on the tagged commit to create a draft
+with all packages and `SHA256SUMS`. A manual workflow run uploads the packages as
+workflow artifacts.
 
 Publish the release, including the combined archive and its `SHA256SUMS` entry,
 before updating `neon-sunset/homebrew-tap`. Set the cask version and SHA-256 to that
