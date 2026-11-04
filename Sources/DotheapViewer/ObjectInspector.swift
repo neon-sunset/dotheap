@@ -107,8 +107,8 @@ struct ObjectDetail: View {
     private func content(_ m: ObjectModel) -> some View {
         let region = snapshot.heap.regions[m.regionIndex]
         return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                Text(m.typeName).font(.headline).textSelection(.enabled)
+            LazyVStack(alignment: .leading, spacing: 2) {
+                Text(m.typeName).font(.headline).textSelection(.enabled).padding(.bottom, 10)
                 Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
                     row("Address", Format.hex(m.address))
                     row("Method table", Format.hex(m.methodTable))
@@ -271,9 +271,10 @@ struct ObjectDetail: View {
     }
 
     private func group(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        LazyVStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.subheadline.weight(.semibold))
+        SwiftUI.Section {
             content()
+        } header: {
+            Text(title).font(.subheadline.weight(.semibold)).padding(.top, 10).padding(.bottom, 2)
         }
     }
 }
@@ -284,13 +285,11 @@ struct FieldTree: View {
     let values: RustArray<HeapSnapshot.FieldValue>
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 2) {
-            ForEach(values) { f in
-                if f.children.isEmpty {
-                    row(f).padding(.leading, 16)
-                } else {
-                    Expandable { row(f) } content: { FieldTree(snapshot: snapshot, values: f.children) }
-                }
+        ForEach(values) { f in
+            if f.children.isEmpty {
+                row(f).padding(.leading, 16)
+            } else {
+                Expandable { row(f) } content: { FieldTree(snapshot: snapshot, values: f.children) }
             }
         }
     }

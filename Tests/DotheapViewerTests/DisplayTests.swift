@@ -190,4 +190,46 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(Format.retained(managed: 4096, native: 0, nativeOwner: false), Format.bytes(4096))
         XCTAssertEqual(Format.retained(managed: 0, native: 4096, nativeOwner: true), Format.bytes(4096))
     }
+
+    @MainActor func testGroupedTableSortsWithinGroupsAndPreservesSelection() async throws {
+        _ = NSApplication.shared
+        struct Row: Identifiable { let id: Int; let group: String; let value: Int }
+        let rows = [Row(id: 0, group: "B", value: 2), Row(id: 1, group: "B", value: 1),
+                    Row(id: 2, group: "A", value: 4), Row(id: 3, group: "A", value: 3)]
+        var selected: Int?
+        func content(_ rows: [Row], ascending: Bool) -> some View {
+            TextTable(rows: rows, columns: [.init("Value", width: 100, flexible: true, value: \.value, text: { String($0.value) })],
+                      sort: .constant(TableSort(column: "Value", ascending: ascending)), group: { $0.group }, selection: 0, select: { selected = $0 })
+        }
+        let host = NSHostingView(rootView: content(rows, ascending: true))
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: 0, width: 400, height: 300), styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        func findTable(_ view: NSView) -> NSTableView? {
+            (view as? NSTableView) ?? view.subviews.lazy.compactMap(findTable).first
+        }
+        func settle() async throws {
+            for _ in 0..<4 { host.layoutSubtreeIfNeeded(); try await Task.sleep(for: .milliseconds(10)) }
+        }
+        try await settle()
+        let table = try XCTUnwrap(findTable(host))
+        func labels() -> [String] {
+            (0..<table.numberOfRows).map { (table.view(atColumn: 0, row: $0, makeIfNecessary: true) as? NSTableCellView)?.textField?.stringValue ?? "" }
+        }
+        XCTAssertEqual(labels(), ["B", "1", "2", "A", "3", "4"])
+        XCTAssertEqual(table.selectedRow, 2)
+        XCTAssertEqual(table.delegate?.tableView?(table, shouldSelectRow: 0), false)
+        table.selectRowIndexes([4], byExtendingSelection: false)
+        XCTAssertEqual(selected, 3)
+        host.rootView = content(rows, ascending: false)
+        try await settle()
+        XCTAssertEqual(labels(), ["B", "2", "1", "A", "4", "3"])
+        XCTAssertEqual(table.selectedRow, 1)
+        host.rootView = content(Array(rows.prefix(2)), ascending: true)
+        try await settle()
+        XCTAssertEqual(labels(), ["B", "1", "2"])
+        XCTAssertEqual(table.selectedRow, 2)
+    }
 }

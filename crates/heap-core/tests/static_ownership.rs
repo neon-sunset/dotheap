@@ -198,3 +198,59 @@ fn a_value_that_fields_of_two_types_reach_belongs_to_static_fields() {
         );
     }
 }
+
+#[test]
+fn shared_values_reached_through_long_chains_preserve_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../scripts/generate-compatibility-fixtures.py")
+            )
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let s = HeapSnapshot::open(
+        &dir.path().join("static-shared-chains.dmp"),
+        vec![],
+        None,
+        AnalysisOptions::default(),
+        CacheChoice::None,
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(s.graph.live_count, 516);
+    let shared = s.heap.count() - 1;
+    for managed_only in [false, true] {
+        let tree = s.owner_tree(managed_only).unwrap();
+        let mut pending = vec![tree.root];
+        let mut seen = std::collections::HashSet::new();
+        let mut objects = 0;
+        let mut shared_owner = None;
+        while let Some(id) = pending.pop() {
+            assert!(seen.insert(id));
+            let entry = tree.entry(&s, id).unwrap().unwrap();
+            objects += usize::from(entry.object.is_some());
+            let children = tree.children(&s, id);
+            let mut bytes = entry.size;
+            for &child in children.iter() {
+                let child_entry = tree.entry(&s, child).unwrap().unwrap();
+                bytes += child_entry.total();
+                if child_entry.object == Some(shared) {
+                    shared_owner = Some(entry.kind);
+                }
+            }
+            assert_eq!(entry.total(), bytes, "{}", entry.name);
+            if entry.kind == OwnerKind::Field {
+                assert_eq!(entry.total(), 0);
+            }
+            pending.extend(children.iter().copied());
+        }
+        assert_eq!(objects, 516);
+        assert_eq!(shared_owner, Some(OwnerKind::Type));
+        assert_eq!(tree.entry(&s, tree.root).unwrap().unwrap().total(), 16_536);
+    }
+}

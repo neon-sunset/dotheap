@@ -98,10 +98,44 @@ final class NavigationTests: XCTestCase {
             }
         }
         let rootPoint = table.convert(NSPoint(x: 250, y: table.rect(ofRow: 0).midY), to: nil)
+        XCTAssertEqual(table.selectionHighlightStyle, .none)
+        for expected in [1, count] {
+            let row = try XCTUnwrap(table.rowView(atRow: 0, makeIfNecessary: true) as? DominatorRowView)
+            let point = expected == 1 ? rootPoint : table.convert(NSPoint(x: 60, y: table.rect(ofRow: 0).midY), to: nil)
+            let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                       windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+            row.mouseEntered(with: down)
+            XCTAssertTrue(row.isHovered)
+            let before = table.numberOfRows
+            NSApp.sendEvent(down)
+            XCTAssertTrue(row.isPressed)
+            XCTAssertEqual(table.numberOfRows, before)
+            let up = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                     windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 0))
+            NSApp.sendEvent(up)
+            XCTAssertFalse(row.isPressed)
+            try await settle(pages)
+            XCTAssertEqual(table.numberOfRows, expected)
+            XCTAssertEqual(table.selectedRow, -1)
+            XCTAssertNil(session.inspectedObject)
+            row.mouseExited(with: up)
+            XCTAssertFalse(row.isHovered)
+        }
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseDragged, .leftMouseUp] {
+            let point = type == .leftMouseDown ? rootPoint : table.convert(NSPoint(x: 250, y: table.rect(ofRow: 1).midY), to: nil)
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                       windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+            NSApp.sendEvent(event)
+        }
+        try await settle(pages)
+        XCTAssertEqual(table.numberOfRows, count)
         try click(rootPoint)
         try await settle(pages)
         XCTAssertEqual(table.numberOfRows, 1)
-        XCTAssertNil(session.inspectedObject)
+        try click(rootPoint)
+        try click(rootPoint)
+        try await settle(pages)
+        XCTAssertEqual(table.numberOfRows, 1)
         try click(rootPoint)
         try await settle(pages)
         XCTAssertEqual(table.numberOfRows, count)
@@ -109,6 +143,14 @@ final class NavigationTests: XCTestCase {
             if let button = view as? NSButton, button.identifier?.rawValue == "inspect", !button.isHidden { return button }
             return view.subviews.lazy.compactMap(inspectButton).first
         }
+        let leaf = try XCTUnwrap((0..<table.numberOfRows).first { index in
+            guard let cell = table.view(atColumn: 0, row: index, makeIfNecessary: true), inspectButton(cell) != nil else { return false }
+            return cell.subviews.first { $0.identifier?.rawValue == "disclosure" }?.isHidden == true
+        })
+        try click(table.convert(NSPoint(x: 700, y: table.rect(ofRow: leaf).midY), to: nil))
+        try await settle(pages)
+        XCTAssertNil(session.inspectedObject)
+        XCTAssertEqual(table.numberOfRows, count)
         let button = try XCTUnwrap(inspectButton(table))
         try click(button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil))
         try await settle(pages)

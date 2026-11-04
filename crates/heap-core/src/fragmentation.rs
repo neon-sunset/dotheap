@@ -56,17 +56,23 @@ impl Contributor {
         }
     }
 
-    fn add(&mut self, snapshot: &HeapSnapshot, object: usize, share: f64) {
-        self.regions.insert(snapshot.heap.region_of(object));
-        self.live_bytes += snapshot.heap.size(object);
+    fn add(&mut self, object: usize, region: usize, size: u64, share: f64) {
+        if self.regions.last().copied() != Some(region) {
+            self.regions.insert(region);
+        }
+        self.live_bytes += size;
         self.waste += share;
         self.samples.push(object);
     }
 
     fn select_samples(&mut self, shares: &[f64]) {
-        self.samples
-            .sort_by(|&a, &b| shares[b].total_cmp(&shares[a]).then(a.cmp(&b)));
-        self.samples.truncate(300);
+        let compare = |&a: &usize, &b: &usize| shares[b].total_cmp(&shares[a]).then(a.cmp(&b));
+        if self.samples.len() > 300 {
+            self.samples.select_nth_unstable_by(300, compare);
+            self.samples.truncate(300);
+        }
+        self.samples.sort_unstable_by(compare);
+        self.samples.shrink_to_fit();
     }
 }
 
@@ -102,11 +108,7 @@ impl FragmentationReport {
 }
 
 impl HeapSnapshot {
-    fn fragmentation_by_code(
-        &self,
-        shares: &[f64],
-        top_nodes: &[Option<usize>],
-    ) -> Result<Vec<Contributor>> {
+    fn fragmentation_by_code(&self, shares: &[f64], top_nodes: &[i32]) -> Result<Vec<Contributor>> {
         let count = self.heap.count();
         let root = self.graph.root_node();
         let application: Vec<_> = self
@@ -115,18 +117,19 @@ impl HeapSnapshot {
             .iter()
             .map(|t| is_application_type(&self.names.name(t.address)))
             .collect();
-        let mut app_owner = vec![None; root + 1];
-        let mut stack = vec![root];
+        let mut app_owner = vec![-1; root + 1];
+        let mut stack = vec![root as i32];
         while let Some(parent) = stack.pop() {
+            let parent = parent as usize;
             for &child in self.graph.dominator_rows.row(parent) {
                 let child = child as usize;
                 app_owner[child] =
                     if child < count && application[self.heap.type_ids[child] as usize] {
-                        Some(child)
+                        child as i32
                     } else {
                         app_owner[parent]
                     };
-                stack.push(child);
+                stack.push(child as i32);
             }
         }
         let holders = application_holders(&self.heap, &self.graph, &application);
@@ -150,10 +153,25 @@ impl HeapSnapshot {
         let mut live_by_region: BTreeMap<i64, BTreeMap<usize, u64>> = BTreeMap::new();
         let mut runtime_keys = HashMap::new();
         let mut runtime_names = HashMap::new();
+        let mut region = 0;
         for (object, &share) in shares.iter().enumerate().filter(|(_, share)| **share > 0.0) {
-            let shared = app_owner[object].is_none() && holders[object].is_some();
-            let owner = app_owner[object].or(holders[object]);
-            let key = if let Some(owner) = owner {
+            while self
+                .heap
+                .regions
+                .get(region + 1)
+                .is_some_and(|r| r.first_object <= object)
+            {
+                region += 1;
+            }
+            let size = self.heap.size(object);
+            let shared = app_owner[object] < 0 && holders[object] >= 0;
+            let owner = if app_owner[object] >= 0 {
+                app_owner[object]
+            } else {
+                holders[object]
+            };
+            let key = if owner >= 0 {
+                let owner = owner as usize;
                 let type_id = self.heap.type_ids[owner];
                 let key = type_id as i64 | if shared { 1 << 40 } else { 0 };
                 areas.entry(key).or_insert_with(|| {
@@ -170,8 +188,17 @@ impl HeapSnapshot {
                 });
                 key
             } else {
-                let top = top_nodes[object].unwrap_or(object);
-                if let Some(&key) = runtime_keys.get(&top) {
+                let top = if top_nodes[object] >= 0 {
+                    top_nodes[object] as usize
+                } else {
+                    object
+                };
+                let identity = if top < count {
+                    (false, self.heap.type_ids[top] as usize)
+                } else {
+                    (true, top)
+                };
+                if let Some(&key) = runtime_keys.get(&identity) {
                     key
                 } else {
                     let name = if top >= count {
@@ -181,24 +208,27 @@ impl HeapSnapshot {
                     };
                     let next = -1 - runtime_names.len() as i64;
                     let key = *runtime_names.entry(name.clone()).or_insert(next);
-                    runtime_keys.insert(top, key);
+                    runtime_keys.insert(identity, key);
                     areas
                         .entry(key)
                         .or_insert_with(|| Contributor::new(format!("c{key}"), name));
                     key
                 }
             };
-            areas.get_mut(&key).unwrap().add(self, object, share);
+            areas
+                .get_mut(&key)
+                .unwrap()
+                .add(object, region, size, share);
             *survivors
                 .entry(key)
                 .or_default()
                 .entry(self.heap.type_ids[object])
-                .or_default() += self.heap.size(object);
+                .or_default() += size;
             *live_by_region
                 .entry(key)
                 .or_default()
-                .entry(self.heap.region_of(object))
-                .or_default() += self.heap.size(object);
+                .entry(region)
+                .or_default() += size;
         }
         for (area, regions) in live_by_region {
             let mut dead: BTreeMap<u32, f64> = BTreeMap::new();
@@ -301,44 +331,73 @@ impl HeapSnapshot {
                 .reasons
                 .sort_by(|a, b| b.waste.cmp(&a.waste).then_with(|| a.name.cmp(&b.name)));
             let root = self.graph.root_node();
-            let mut owners = vec![None; root + 1];
-            let mut stack = vec![root];
+            let mut owners = vec![-1; root + 1];
+            let mut stack = vec![root as i32];
             while let Some(parent) = stack.pop() {
+                let parent = parent as usize;
                 for &child in self.graph.dominator_rows.row(parent) {
                     let child = child as usize;
                     owners[child] = if parent == root {
-                        Some(child)
+                        child as i32
                     } else {
                         owners[parent]
                     };
-                    stack.push(child);
+                    stack.push(child as i32);
                 }
             }
             let mut by_type = BTreeMap::new();
-            let mut by_owner = BTreeMap::new();
+            let mut by_owner = Vec::<Contributor>::new();
+            let mut owner_indices = HashMap::new();
+            let mut owner_names = HashMap::<String, usize>::new();
+            let mut region = 0;
             for (object, &share) in shares.iter().enumerate().filter(|(_, s)| **s > 0.0) {
+                while self
+                    .heap
+                    .regions
+                    .get(region + 1)
+                    .is_some_and(|r| r.first_object <= object)
+                {
+                    region += 1;
+                }
+                let size = self.heap.size(object);
                 let type_id = self.heap.type_ids[object];
                 by_type
                     .entry(type_id)
                     .or_insert_with(|| {
                         Contributor::new(format!("t{type_id}"), self.type_name(object))
                     })
-                    .add(self, object, share);
-                let name = match owners[object] {
-                    None => "(not reached)".into(),
-                    Some(owner) if owner >= self.heap.count() => self.node_name(owner)?,
-                    Some(owner) => format!(
-                        "object reachable from several roots: {}",
-                        self.type_name(owner)
-                    ),
+                    .add(object, region, size, share);
+                let owner = owners[object];
+                let identity = if owner >= 0 && (owner as usize) < self.heap.count() {
+                    (Some(self.heap.type_ids[owner as usize]), 0)
+                } else {
+                    (None, owner)
                 };
-                by_owner
-                    .entry(name.clone())
-                    .or_insert_with(|| Contributor::new(name.clone(), name))
-                    .add(self, object, share);
+                let index = match owner_indices.entry(identity) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let name = if owner < 0 {
+                            "(not reached)".into()
+                        } else if owner as usize >= self.heap.count() {
+                            self.node_name(owner as usize)?
+                        } else {
+                            format!(
+                                "object reachable from several roots: {}",
+                                self.type_name(owner as usize)
+                            )
+                        };
+                        let index = *owner_names.entry(name.clone()).or_insert_with(|| {
+                            let index = by_owner.len();
+                            by_owner.push(Contributor::new(name.clone(), name));
+                            index
+                        });
+                        *entry.insert(index)
+                    }
+                };
+                by_owner[index].add(object, region, size, share);
             }
             report.by_type = sorted_contributors(by_type.into_values(), &shares);
-            report.by_owner = sorted_contributors(by_owner.into_values(), &shares);
+            report.by_owner = sorted_contributors(by_owner.into_iter(), &shares);
             report.by_code = self.fragmentation_by_code(&shares, &owners)?;
             Ok(report)
         })
@@ -598,24 +657,24 @@ fn application_holders(
     heap: &crate::heap::ManagedHeap,
     graph: &crate::graph::HeapGraph,
     application: &[bool],
-) -> Vec<Option<usize>> {
-    let mut holders = vec![None; heap.count()];
+) -> Vec<i32> {
+    let mut holders = vec![-1; heap.count()];
     let mut queue = Vec::new();
     for (object, holder) in holders.iter_mut().enumerate() {
         if graph.live[object] != 0 && application[heap.type_ids[object] as usize] {
-            *holder = Some(object);
-            queue.push(object);
+            *holder = object as i32;
+            queue.push(object as i32);
         }
     }
     let mut head = 0;
     while head < queue.len() {
-        let object = queue[head];
+        let object = queue[head] as usize;
         head += 1;
         for target in graph.edges(object) {
             let target = target as usize;
-            if holders[target].is_none() && graph.live[target] != 0 {
+            if holders[target] < 0 && graph.live[target] != 0 {
                 holders[target] = holders[object];
-                queue.push(target);
+                queue.push(target as i32);
             }
         }
     }
@@ -625,6 +684,24 @@ fn application_holders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn samples_keep_the_largest_shares_and_break_ties_by_object_index() {
+        let shares: Vec<_> = (0..20_000)
+            .map(|i| ((i * 117) % 503) as f64 / 7.0)
+            .collect();
+        for count in [0, 1, 299, 300, 301, shares.len()] {
+            let mut expected: Vec<_> = (0..count).collect();
+            expected.sort_by(|&a, &b| shares[b].total_cmp(&shares[a]).then(a.cmp(&b)));
+            expected.truncate(300);
+            let mut contributor = Contributor {
+                samples: (0..count).rev().collect(),
+                ..Contributor::default()
+            };
+            contributor.select_samples(&shares);
+            assert_eq!(contributor.samples, expected);
+        }
+    }
 
     #[test]
     fn gen2_requires_both_thresholds_and_server_heaps_share_the_vote() {
@@ -684,6 +761,56 @@ mod tests {
     use std::{path::Path, process::Command};
 
     #[test]
+    fn fragmentation_preserves_region_totals_owner_groups_and_samples() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/generate-compatibility-fixtures.py");
+        assert!(
+            Command::new(if cfg!(windows) { "python" } else { "python3" })
+                .arg(script)
+                .arg(directory.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let snapshot = HeapSnapshot::open(
+            &directory.path().join("reference-rooted.dmp"),
+            Vec::new(),
+            None,
+            AnalysisOptions::default(),
+            CacheChoice::None,
+            |_, _| {},
+        )
+        .unwrap();
+        let report = snapshot.fragmentation().unwrap();
+        assert_eq!(report.total_waste, 28_592);
+        assert_eq!(report.by_type.len(), 2);
+        assert_eq!(report.by_type[0].samples, [0]);
+        assert_eq!(report.by_type[1].samples, [1]);
+        assert_eq!(report.by_type[0].live_bytes, 32);
+        assert_eq!(report.by_type[1].live_bytes, 24);
+        assert_eq!(report.by_owner.len(), 1);
+        assert_eq!(report.by_code.len(), 1);
+        for contributor in [&report.by_owner[0], &report.by_code[0]] {
+            assert_eq!(contributor.live_bytes, 56);
+            assert_eq!(contributor.waste, 28_592.0);
+            assert_eq!(contributor.samples, [0, 1]);
+            assert_eq!(contributor.regions, BTreeSet::from([0]));
+        }
+        assert_eq!(report.by_owner[0].name, "registers of thread 1");
+        assert_eq!(report.by_code[0].name, "runtime: registers of thread 1");
+        assert_eq!(report.by_code[0].dead_around_bytes, 24.0);
+        assert_eq!(
+            report.by_code[0]
+                .survivor_types
+                .iter()
+                .map(|t| t.bytes)
+                .collect::<Vec<_>>(),
+            [32, 24]
+        );
+    }
+
+    #[test]
     fn dependent_handles_participate_in_application_ownership() {
         let directory = tempfile::tempdir().unwrap();
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -710,12 +837,12 @@ mod tests {
         application[snapshot.heap.type_ids[0] as usize] = true;
         assert_eq!(
             application_holders(&snapshot.heap, &snapshot.graph, &application),
-            [Some(0), None, None]
+            [0, -1, -1]
         );
         snapshot.graph.saved.dependents.insert(0, vec![1]);
         assert_eq!(
             application_holders(&snapshot.heap, &snapshot.graph, &application),
-            [Some(0), Some(0), None]
+            [0, 0, -1]
         );
     }
 }

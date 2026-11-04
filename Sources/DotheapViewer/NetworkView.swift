@@ -7,10 +7,10 @@ struct NetworkView: View {
     @Environment(Session.self) private var session
     let snapshot: HeapSnapshot
     @State private var text = ""
-    @State private var groupOrder = [KeyPathComparator(\SocketGroup.open, order: .reverse), KeyPathComparator(\SocketGroup.count, order: .reverse)]
+    @State private var groupOrder: TableSort? = TableSort(column: "Sockets", ascending: false)
     @State private var requestOrder: TableSort? = TableSort(column: "Direction", ascending: true)
     @State private var poolOrder: TableSort? = TableSort(column: "Queued requests", ascending: false)
-    @State private var ownerPoolOrder = [KeyPathComparator(\HeapSnapshot.HttpClientPool.queued, order: .reverse), KeyPathComparator(\HeapSnapshot.HttpClientPool.active, order: .reverse)]
+    @State private var ownerPoolOrder: TableSort? = TableSort(column: "Queued requests", ascending: false)
     @State private var poolGrouping = PoolGrouping.flat
     @State private var engineOrder: TableSort? = TableSort(column: "fd", ascending: true)
 
@@ -22,43 +22,73 @@ struct NetworkView: View {
     struct SocketGroup: Identifiable {
         let id: String
         let sockets: [HeapSnapshot.SocketInfo]
-        var parts: [String] { id.split(separator: "\t", omittingEmptySubsequences: false).map(String.init) }
+        let kind: String
+        let transport: String
+        let owner: String
+        let peer: String
+        let receives: Int
+        let sends: Int
         var count: Int { sockets.count }
-        var kind: String { parts[0] }
-        var transport: String { parts[1] }
-        var owner: String { parts[2] }
-        var peer: String { parts[3] }
         /// Open sockets sort before closed ones.
         var open: Int { kind == "closed" ? 0 : 1 }
-        var receives: Int { sockets.reduce(0) { $0 + $1.pendingReceives } }
-        var sends: Int { sockets.reduce(0) { $0 + $1.pendingSends } }
+        init(id: String, sockets: [HeapSnapshot.SocketInfo]) {
+            self.id = id; self.sockets = sockets
+            let parts = id.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            kind = parts[0]; transport = parts[1]; owner = parts[2]; peer = parts[3]
+            receives = sockets.reduce(0) { $0 + $1.pendingReceives }
+            sends = sockets.reduce(0) { $0 + $1.pendingSends }
+        }
+    }
+
+    struct Model {
+        let network: HeapSnapshot.Network
+        let groups: [SocketGroup]
+        let open, incoming, outgoing, receives, sends, incomingRequests, registered, queued: Int
+
+        init(_ network: HeapSnapshot.Network) {
+            self.network = network
+            groups = Dictionary(grouping: network.sockets, by: HeapSnapshot.socketGroup)
+                .map { SocketGroup(id: $0.key, sockets: $0.value) }
+                .sorted { ($0.open, $0.count, $1.id) > ($1.open, $1.count, $0.id) }
+            var open = 0, incoming = 0, outgoing = 0, receives = 0, sends = 0
+            for socket in network.sockets {
+                if socket.state != "closed" { open += 1 }
+                if socket.state == "connected" {
+                    if socket.direction == "incoming" { incoming += 1 }
+                    if socket.direction == "outgoing" { outgoing += 1 }
+                }
+                receives += socket.pendingReceives; sends += socket.pendingSends
+            }
+            self.open = open; self.incoming = incoming; self.outgoing = outgoing
+            self.receives = receives; self.sends = sends
+            incomingRequests = network.requests.reduce(0) { $0 + ($1.incoming ? 1 : 0) }
+            registered = network.engines.reduce(0) { $0 + $1.registered }
+            queued = network.engines.reduce(0) { $0 + $1.queuedEvents }
+        }
     }
 
     var body: some View {
-        Computed(snapshot, key: "network page", label: "Reading the sockets", compute: { try $0.network() }) { model in
+        Computed(snapshot, key: "network page", label: "Reading the sockets", compute: { try Model($0.network()) }) { model in
             content(model)
         }
     }
 
-    private func content(_ n: HeapSnapshot.Network) -> some View {
+    private func content(_ model: Model) -> some View {
         @Bindable var session = session
-        let open = n.sockets.filter { $0.state != "closed" }
-        func count(_ direction: String) -> Int { n.sockets.filter { $0.direction == direction && $0.state == "connected" }.count }
-        let incoming = n.requests.filter(\.incoming).count
+        let n = model.network
         return VStack(alignment: .leading, spacing: 10) {
             Text("Network").font(.title2.weight(.semibold))
             Text("Socket descriptors, endpoints, owners and pending reads/writes; Kestrel and HttpClient requests; connection pools; and socket engines (epoll on Linux, kqueue on macOS). A pending receive waits for peer data and can be an idle connection. Closed sockets can remain referenced by pooled objects.")
                 .foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             MetricRow {
-                Metric(title: "Sockets", value: n.sockets.count.formatted(), detail: "\(open.count.formatted()) open")
-                Metric(title: "Incoming", value: count("incoming").formatted(), detail: "connections a listener accepted", hideZero: true)
-                Metric(title: "Outgoing", value: count("outgoing").formatted(), detail: "connections the process opened", hideZero: true)
-                Metric(title: "Pending", value: n.sockets.reduce(0) { $0 + $1.pendingReceives }.formatted(),
-                       detail: "receives, \(n.sockets.reduce(0) { $0 + $1.pendingSends }) sends", hideZero: true)
-                Metric(title: "Requests", value: n.requests.count.formatted(), detail: "\(incoming) incoming, \(n.requests.count - incoming) outgoing", hideZero: true)
+                Metric(title: "Sockets", value: n.sockets.count.formatted(), detail: "\(model.open.formatted()) open")
+                Metric(title: "Incoming", value: model.incoming.formatted(), detail: "connections a listener accepted", hideZero: true)
+                Metric(title: "Outgoing", value: model.outgoing.formatted(), detail: "connections the process opened", hideZero: true)
+                Metric(title: "Pending", value: model.receives.formatted(), detail: "receives, \(model.sends) sends", hideZero: true)
+                Metric(title: "Requests", value: n.requests.count.formatted(), detail: "\(model.incomingRequests) incoming, \(n.requests.count - model.incomingRequests) outgoing", hideZero: true)
                 Metric(title: "Socket engines", value: n.engines.count.formatted(),
-                       detail: "\(n.engines.reduce(0) { $0 + $1.registered }) sockets, \(n.engines.reduce(0) { $0 + $1.queuedEvents }) queued events",
-                       color: n.engines.contains { $0.queuedEvents > 0 } ? Palette.queued : nil, hideZero: true)
+                       detail: "\(model.registered) sockets, \(model.queued) queued events",
+                       color: model.queued > 0 ? Palette.queued : nil, hideZero: true)
             }
             HStack(spacing: 8) {
                 Picker("Show", selection: $session.networkMode) { ForEach(Mode.allCases) { Text($0.rawValue).tag($0) } }
@@ -66,7 +96,7 @@ struct NetworkView: View {
                 TextField("Filter by owner, endpoint, host or path", text: $text).textFieldStyle(.roundedBorder).frame(maxWidth: 320)
             }
             switch session.networkMode {
-            case .connections: connections(n)
+            case .connections: connections(model.groups)
             case .requests: requests(n)
             case .pools: pools(n)
             }
@@ -74,22 +104,25 @@ struct NetworkView: View {
         .padding(16)
     }
 
-    private func connections(_ n: HeapSnapshot.Network) -> some View {
+    private func connections(_ all: [SocketGroup]) -> some View {
         @Bindable var session = session
-        let groups = Dictionary(grouping: n.sockets, by: HeapSnapshot.socketGroup).map { SocketGroup(id: $0.key, sockets: $0.value) }
-            .filter { g in text.isEmpty || g.id.localizedCaseInsensitiveContains(text) || g.sockets.contains { ($0.connectionId ?? "").localizedCaseInsensitiveContains(text) } }
-            .sorted { ($0.open, $0.count, $1.id) > ($1.open, $1.count, $0.id) }
-            .sorted(using: groupOrder)
+        let groups = text.isEmpty ? all : all.filter { g in
+            g.id.localizedCaseInsensitiveContains(text) || g.sockets.contains { ($0.connectionId ?? "").localizedCaseInsensitiveContains(text) }
+        }
         return SplitPanes(axis: .horizontal, firstMin: 280, secondMin: 260, initial: 0.55) {
-            Table(groups, selection: $session.networkGroup, sortOrder: $groupOrder) {
-                TableColumn("Sockets", value: \SocketGroup.count) { g in Text(g.sockets.count.formatted()).monospacedDigit() }.width(min: 40, ideal: 50)
-                TableColumn("Kind", value: \SocketGroup.kind) { g in Text(g.parts[0]).foregroundStyle(Self.color(g.parts[0])) }.width(min: 60, ideal: 80)
-                TableColumn("Transport", value: \SocketGroup.transport) { g in Text(g.parts[1]) }.width(min: 50, ideal: 80)
-                TableColumn("Owner", value: \SocketGroup.owner) { g in TypeNameText(name: g.parts[2], singleLine: true) }.width(min: 100, ideal: 200)
-                TableColumn("Other side", value: \SocketGroup.peer) { g in Text(g.parts[3]).lineLimit(2).help(g.parts[3]) }.width(min: 100, ideal: 180)
-                TableColumn("Receives", value: \SocketGroup.receives) { g in Text(g.receives.formatted()).monospacedDigit().foregroundStyle(g.receives > 0 ? .primary : .secondary) }.width(min: 40, ideal: 60)
-                TableColumn("Sends", value: \SocketGroup.sends) { g in Text(g.sends.formatted()).monospacedDigit().foregroundStyle(g.sends > 0 ? .primary : .secondary) }.width(min: 40, ideal: 50)
-            }
+            TextTable(rows: groups, columns: [
+                .init("Sockets", width: 60, minWidth: 40, font: .digits,
+                      ascending: { ($0.open, $0.count, $1.id) < ($1.open, $1.count, $0.id) }, text: { $0.count.formatted() }),
+                .init("Kind", width: 80, minWidth: 60, value: \.kind, text: \.kind, color: { NSColor(Self.color($0.kind)) }),
+                .init("Transport", width: 80, minWidth: 50, value: \.transport, text: \.transport),
+                .init("Owner", width: 200, minWidth: 100, truncation: .byTruncatingMiddle, value: \.owner, text: \.owner,
+                      help: { $0.owner }, isTypeName: { _ in true }),
+                .init("Other side", width: 180, minWidth: 100, flexible: true, value: \.peer, text: \.peer, help: { $0.peer }),
+                .init("Receives", width: 60, minWidth: 40, font: .digits, value: \.receives, text: { $0.receives.formatted() },
+                      color: { $0.receives > 0 ? .labelColor : .secondaryLabelColor }),
+                .init("Sends", width: 50, minWidth: 40, font: .digits, value: \.sends, text: { $0.sends.formatted() },
+                      color: { $0.sends > 0 ? .labelColor : .secondaryLabelColor }),
+            ], sort: $groupOrder, selection: session.networkGroup, select: { session.networkGroup = $0 })
         } second: {
             if let g = groups.first(where: { $0.id == session.networkGroup }) {
                 SocketList(snapshot: snapshot, group: g).id(g.id)
@@ -152,20 +185,18 @@ struct NetworkView: View {
                           text: { $0.queued.formatted() }, color: { $0.queued > 0 ? NSColor(Palette.dead) : .secondaryLabelColor }),
                 ], sort: $poolOrder, selection: session.selectedObject, select: select)
             case .owner:
-                let handlers = Dictionary(grouping: list.sorted(using: ownerPoolOrder)) { $0.handler ?? -1 }.sorted { ($0.value.count, $1.key) > ($1.value.count, $0.key) }
-                Table(of: HeapSnapshot.HttpClientPool.self, selection: Binding(get: { nil as Int? }, set: select), sortOrder: $ownerPoolOrder) {
-                    TableColumn("Host", value: \HeapSnapshot.HttpClientPool.host) { p in Text(p.host).lineLimit(1).truncationMode(.middle).help(p.host) }.width(min: 120, ideal: 260)
-                    TableColumn("Kind", value: \HeapSnapshot.HttpClientPool.kind) { p in Text(p.kind + (p.proxy.map { " " + $0 } ?? "")).lineLimit(1).help(p.proxy ?? "") }.width(min: 50, ideal: 70)
-                    TableColumn("Connections", value: \HeapSnapshot.HttpClientPool.connections) { p in Text(Self.connections(p)).monospacedDigit() }.width(min: 80, ideal: 120)
-                    TableColumn("Active requests", value: \HeapSnapshot.HttpClientPool.active) { p in Text(p.active.formatted()).monospacedDigit() }.width(min: 60, ideal: 100)
-                    TableColumn("Queued requests", value: \HeapSnapshot.HttpClientPool.queued) { p in Text(p.queued.formatted()).monospacedDigit().foregroundStyle(p.queued > 0 ? Palette.dead : .secondary) }.width(min: 60, ideal: 100)
-                } rows: {
-                    ForEach(handlers, id: \.key) { handler, pools in
-                        SwiftUI.Section(pools[0].handlerOwner + (handler >= 0 ? ", SocketsHttpHandler " + Format.hex(snapshot.heap.addresses[handler]) : "")) {
-                            ForEach(pools) { TableRow($0) }
-                        }
-                    }
-                }
+                let handlers = Dictionary(grouping: list) { $0.handler ?? -1 }.sorted { ($0.value.count, $1.key) > ($1.value.count, $0.key) }
+                TextTable(rows: handlers.flatMap(\.value), columns: [
+                    .init("Host", width: 260, minWidth: 120, flexible: true, truncation: .byTruncatingMiddle, value: \.host, text: \.host, help: { $0.host }),
+                    .init("Kind", width: 70, minWidth: 50, value: \.kind, text: { $0.kind + ($0.proxy.map { " " + $0 } ?? "") }, help: { $0.proxy ?? "" }),
+                    .init("Connections", width: 120, minWidth: 80, font: .digits, value: \.connections, text: { Self.connections($0) }),
+                    .init("Active requests", width: 100, minWidth: 60, font: .digits, value: \.active, text: { $0.active.formatted() }),
+                    .init("Queued requests", width: 100, minWidth: 60, font: .digits,
+                          ascending: { ($0.queued, $0.active) < ($1.queued, $1.active) }, text: { $0.queued.formatted() },
+                          color: { $0.queued > 0 ? NSColor(Palette.dead) : .secondaryLabelColor }),
+                ], sort: $ownerPoolOrder, group: { pool in
+                    pool.handlerOwner + (pool.handler.map { ", SocketsHttpHandler " + Format.hex(snapshot.heap.addresses[$0]) } ?? "")
+                }, selection: session.selectedObject, select: select)
             }
             Text("Socket engines").font(.headline)
             Text("Each engine has one epoll (kqueue on macOS) file descriptor and one thread that reads socket events and queues them for the thread pool.")

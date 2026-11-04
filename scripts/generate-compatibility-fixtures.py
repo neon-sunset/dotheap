@@ -241,6 +241,39 @@ def static_fields(path, mode):
     path.write_bytes(data)
 
 
+def static_chains(path):
+    static_fields(path, "fields")
+    data = bytearray(path.read_bytes())
+
+    def put(address, value, fmt="Q"):
+        struct.pack_into("<" + fmt, data, 8192 + address - contract.PAGE, value)
+
+    leaf = contract.PAGE + 0x2200
+    put(leaf, 0x01000000, "I")
+    put(leaf + 4, 32, "I")
+    put(leaf - 8, 1)
+    put(leaf - 16, 8)
+    put(leaf - 24, -16, "q")
+    count = 256
+    extra = contract.FIRST + 200
+    shared = extra + count * 64
+    for i, offset in enumerate((16, 24, 32, 40)):
+        put(contract.FIRST + offset, contract.FIRST + 136 + (i % 2) * 32)
+    for side in range(2):
+        chain = [contract.FIRST + 136 + side * 32]
+        chain += [extra + (side * count + i) * 32 for i in range(count)]
+        for i, node in enumerate(chain):
+            put(node, leaf)
+            put(node + 8, chain[i + 1] if i + 1 < len(chain) else 0)
+            put(node + 16, shared)
+    put(shared, leaf)
+    offsets = contract.OFFSETS["current"]
+    put(contract.REGION + offsets[0], shared + 32)
+    put(contract.REGION + offsets[6], 56 + (2 * (count + 1) + 1) * 32)
+    put(contract.REGION + offsets[7], 2 * (count + 1) + 2, "I")
+    path.write_bytes(data)
+
+
 def generate(folder):
     folder.mkdir(parents=True, exist_ok=True)
     cases = []
@@ -283,6 +316,7 @@ def generate(folder):
 
     for mode in ("fields", "types", "unnamed", "owned", "values"):
         static_fields(folder / f"static-shared-{mode}.dmp", mode)
+    static_chains(folder / "static-shared-chains.dmp")
 
     references = bytearray((folder / "reference-array-rooted.dmp").read_bytes())
     method_table = 8192 + contract.MT - contract.PAGE

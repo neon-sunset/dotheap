@@ -52,11 +52,12 @@ struct DominatorTree: View {
     let wide: Bool
     var compact = false
     @State private var open: Set<String> = []
+    @State private var loading: [String: Bool] = [:]
     @State private var limits: [String: Int] = [:]
     static let autoOpenDepth = 5
 
     enum Item {
-        case node(Int), group(HeapSnapshot.OwnershipGroup), more(parent: String, remaining: Int)
+        case node(Int), group(HeapSnapshot.OwnershipGroup), more(parent: String, remaining: Int), loading
     }
 
     struct Row: Identifiable {
@@ -77,7 +78,7 @@ struct DominatorTree: View {
             let nodes = graph.children(of: n)
             return (nodes.prefix(limit).map { .node($0) }, nodes.count)
         case let .group(g): return (g.nodes.prefix(limit).map { .node($0) }, g.nodes.count)
-        case .more: return ([], 0)
+        case .more, .loading: return ([], 0)
         }
     }
 
@@ -86,6 +87,7 @@ struct DominatorTree: View {
         case let .node(n): parent + "/" + String(n)
         case let .group(g): parent + "/group/" + String(g.nodes[0])
         case let .more(p, _): p + "/more"
+        case .loading: parent + "/loading"
         }
     }
 
@@ -97,10 +99,14 @@ struct DominatorTree: View {
                 switch item {
                 case let .node(n): hasChildren = graph.hasChildren(n)
                 case .group: hasChildren = true
-                case .more: hasChildren = false
+                case .more, .loading: hasChildren = false
                 }
                 out.append(Row(id: id, depth: depth, item: item, hasChildren: hasChildren))
                 guard hasChildren, open.contains(id) else { return }
+                if let showMessage = loading[id] {
+                    if showMessage { out.append(Row(id: id + "/loading", depth: depth + 1, item: .loading, hasChildren: false)) }
+                    return
+                }
                 let limit = limits[id] ?? 100, list = try children(item, limit: limit)
                 for c in list.items { try walk(c, self.id(c, parent: id), depth + 1) }
                 if list.count > limit { out.append(Row(id: id + "/more", depth: depth + 1, item: .more(parent: id, remaining: list.count - limit), hasChildren: false)) }
@@ -118,10 +124,6 @@ struct DominatorTree: View {
                            inspect: inspect, action: { row in
                                if case let .more(parent, _) = row.item { limits[parent, default: 100] += 200 }
                                else if row.hasChildren { toggle(row) }
-                               else if case let .node(node) = row.item {
-                                   do { inspect(try graph.entry(node)) }
-                                   catch { session.error = analysisErrorMessage(error) }
-                               }
                            }, failed: { session.error = analysisErrorMessage($0) })
         }
         .onAppear {
@@ -140,19 +142,29 @@ struct DominatorTree: View {
 
     private func toggle(_ row: Row) {
         if open.contains(row.id) { open.remove(row.id); return }
+        open.insert(row.id)
+        guard loading[row.id] == nil else { return }
         if case let .node(node) = row.item {
+            loading[row.id] = false
             let graph = graph
             let grouped = groupByType
             Task {
+                let indicator = Task {
+                    try await Task.sleep(for: .milliseconds(150))
+                    loading[row.id] = true
+                }
+                defer { indicator.cancel(); loading.removeValue(forKey: row.id) }
                 do {
                     try await Task.detached {
                         if grouped { _ = try graph.groups(of: node) }
                         else { _ = graph.children(of: node) }
                     }.value
-                    open.insert(row.id)
-                } catch { session.error = analysisErrorMessage(error) }
+                } catch {
+                    open.remove(row.id)
+                    session.error = analysisErrorMessage(error)
+                }
             }
-        } else { open.insert(row.id) }
+        }
     }
 
     /// Opens the root and a chain of single children below it.
