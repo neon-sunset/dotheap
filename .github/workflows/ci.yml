@@ -30,7 +30,7 @@ jobs:
       - run: python3 scripts/check-heap-contract.py target/release/dotheap
       - run: python3 scripts/check-core-headers.py target/release/dotheap
       - run: python3 scripts/check-compressed-core.py target/release/dotheap
-      - run: python3 scripts/check-runtime-dump.py target/release/dotheap
+      - run: sudo -n "$(command -v python3)" scripts/check-runtime-dump.py target/release/dotheap
 
   linux:
     strategy:
