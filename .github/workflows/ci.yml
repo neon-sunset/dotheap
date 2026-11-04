@@ -22,8 +22,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --locked
       - run: python3 scripts/generate-notices.py --check
-      - run: cargo build --release --locked -p dotheap
-      - run: scripts/make-app.sh
+      - run: scripts/build-macos.sh
+      - run: scripts/package-macos.sh
       - run: git diff --exit-code -- Sources/RustHeapCore/Generated.swift Sources/RustHeapCoreFFI crates/heap-bridge/src/generated.rs crates/heap-bridge/src/models.rs
       - run: swift test
       - run: target/release/dotheap help
