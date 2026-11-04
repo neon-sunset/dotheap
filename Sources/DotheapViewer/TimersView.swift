@@ -68,7 +68,7 @@ struct TimersView: View {
                     TableColumn("Timers", value: \TimerGroup.count) { g in Text(g.count.formatted()).monospacedDigit() }.width(min: 40, ideal: 50)
                     TableColumn("Kind", value: \TimerGroup.kind) { g in Text(g.kind) }.width(min: 70, ideal: 100)
                     TableColumn("Calls or awaited by", value: \TimerGroup.does) { g in Text(g.does).lineLimit(2).help(g.does) }.width(min: 140, ideal: 300)
-                    TableColumn("Held by", value: \TimerGroup.heldBy) { g in Text(g.heldBy).lineLimit(2).help(g.heldBy) }.width(min: 100, ideal: 200)
+                    TableColumn("Held by", value: \TimerGroup.heldBy) { g in TypeNameText(name: g.heldBy, singleLine: true) }.width(min: 100, ideal: 200)
                     TableColumn("Period", value: \TimerGroup.periodValue) { g in Text(g.period) }.width(min: 50, ideal: 80)
                 }
             } second: {

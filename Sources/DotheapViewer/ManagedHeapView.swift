@@ -11,7 +11,7 @@ struct ByteSegment: Identifiable {
 }
 
 enum ByteCategory: String, CaseIterable {
-    case live = "Live", pending = "Pending finalization", dead = "Dead", free = "Free gaps", gcStorage = "GC storage", unparsed = "Unparsed", headers = "Region headers",
+    case live = "Live", pending = "Pending finalization", dead = "Dead", free = "Free gaps", gcStorage = "GC storage", unparsed = "Unparsed", headers = "Headers",
          committedUnused = "Committed, unused"
 
     var color: Color {
@@ -50,21 +50,43 @@ struct StackedBytesChart: View {
                 .foregroundStyle(by: .value("Category", s.category))
         }
         .chartForegroundStyleScale(domain: ByteCategory.allCases.map(\.rawValue), range: ByteCategory.allCases.map(\.color))
+        .modifier(HorizontalBarAxes())
         .chartXAxisLabel("MB")
         .frame(height: CGFloat(max(stats.count, 2)) * 34 + 50)
+    }
+}
+
+private struct HorizontalBarAxes: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .chartXAxis {
+                AxisMarks(preset: .aligned) { value in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(anchor: value.index == 0 ? .topLeading : value.index == value.count - 1 ? .topTrailing : .top,
+                                   collisionResolution: .disabled)
+                        .offset(x: value.index == 0 ? 4 : 0)
+                }
+            }
+            .chartYAxis {
+                AxisMarks(preset: .inset, position: .leading) {
+                    AxisGridLine()
+                    AxisValueLabel(anchor: .topLeading)
+                }
+            }
     }
 }
 
 struct RegionStatsTable: View {
     let stats: RustArray<RegionStats>
     var queueNames = false
-    var gc = HeapKind.GC.satori
+    let kind: HeapKind
 
     var body: some View {
         Grid(alignment: .trailing, horizontalSpacing: 14, verticalSpacing: 4) {
             GridRow {
                 Text("").gridColumnAlignment(.leading)
-                ForEach(["Regions", "Span", "Committed", "Used", "Live", "Pending finalization", "Dead", "Free", "GC storage", "Unparsed", "Live/used", "Satori occupancy"], id: \.self) {
+                ForEach([kind.usesSegments ? "Ranges" : "Regions", "Span", "Committed", "Used", "Live", "Pending finalization", "Dead", "Free", "GC storage", "Unparsed", "Live/used"] + (kind.gc == .satori ? ["Satori occupancy"] : []), id: \.self) {
                     Text($0).font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -72,7 +94,7 @@ struct RegionStatsTable: View {
             ForEach(stats) { s in
                 GridRow {
                     Group {
-                        if queueNames { QueueLabel(raw: s.name) } else { Text(s.name).help(Glossary.generation(s.name, gc: gc)) }
+                        if queueNames { QueueLabel(raw: s.name) } else { Text(s.name).help(Glossary.generation(s.name, gc: kind.gc)) }
                     }
                     .gridColumnAlignment(.leading)
                     Text("\(s.regions)")
@@ -80,7 +102,7 @@ struct RegionStatsTable: View {
                     Text(Format.mb(s.live)); Text(Format.mb(s.pending)); Text(Format.mb(s.dead)); Text(Format.mb(s.free))
                     Text(Format.mb(s.gcStorage)); Text(Format.mb(s.unparsed))
                     Text(Format.percent(Double(s.live), Double(s.used)))
-                    Text(s.satoriOccupancy.map(Format.mb) ?? "–")
+                    if kind.gc == .satori { Text(s.satoriOccupancy.map(Format.mb) ?? "–") }
                 }
                 .font(.callout.monospacedDigit())
             }
@@ -98,7 +120,7 @@ struct ManagedHeapView: View {
         @Bindable var session = session
         VStack(spacing: 0) {
             PageToolbar {
-                SegmentedPicker(title: "View", values: HeapView.allCases, selection: $session.heapView, label: \.rawValue)
+                SegmentedPicker(title: "View", values: HeapView.allCases, selection: $session.heapView, label: { $0.title(snapshot.heap.kind) })
                     .fixedSize()
             }
             switch session.heapView {
@@ -117,6 +139,7 @@ struct HeapStatisticsView: View {
         let t = snapshot.totalStats
         let heap = snapshot.heap
         let headers = t.headers
+        let ranges = heap.kind.usesSegments ? "segment ranges" : "regions"
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -129,7 +152,7 @@ struct HeapStatisticsView: View {
                     Text(".NET libraries \(v.netCore ?? "of an unknown version")" + (v.aspNetCore.map { ", ASP.NET Core \($0)" } ?? "")).font(.caption).foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 190, maximum: 190), spacing: 10, alignment: .topLeading)], alignment: .leading, spacing: 10) {
-                    Metric(title: "Committed", value: Format.mb(t.committed), detail: "\(heap.regions.count) regions")
+                    Metric(title: "Committed", value: Format.mb(t.committed), detail: "\(heap.regions.count) \(ranges)")
                     Metric(title: "Used", value: Format.mb(t.used))
                     let g = snapshot.graph
                     Metric(title: "Live", value: Format.mb(t.live), detail: "\(g.liveCount.formatted()) objects, \(Format.percent(Double(t.live), Double(t.used))) of used", color: Palette.live)
@@ -141,30 +164,32 @@ struct HeapStatisticsView: View {
                     if t.gcStorage > 0 {
                         Metric(title: "GC storage", value: Format.mb(t.gcStorage), detail: "work chunks and finalization queue; includes unused capacity", color: Palette.gcStorage)
                     }
-                    Metric(title: "Region headers", value: Format.mb(headers), color: Palette.headers)
+                    Metric(title: "Headers", value: Format.mb(headers), color: Palette.headers)
                     if heap.kind.gc == .satori {
                         Metric(title: "Reserved", value: Format.mb(heap.pages.reduce(0) { $0 + $1.end - $1.start }), detail: "\(heap.pages.count) pages of address space")
                     } else {
-                        Metric(title: "Reserved", value: Format.mb(heap.regions.reduce(0) { $0 + $1.size }), detail: "by \(heap.regions.count) regions")
+                        Metric(title: "Reserved", value: Format.mb(heap.regions.reduce(0) { $0 + $1.size }), detail: "by \(heap.regions.count) \(ranges)")
                     }
                     Metric(title: "Fragmentation", value: snapshot.fragmentationShare.formatted(.percent.precision(.fractionLength(0))),
-                           detail: "(dead + free) / (objects + free) in regions of a generation")
+                           detail: "(dead + free) / (objects + free) in \(ranges) of a generation")
                     Metric(title: "Threads", value: "\(snapshot.dump.threads.count)", detail: "\(snapshot.graph.sources.count) root sources")
                 }
 
-                section("By generation", detail: heap.kind.gc == .satori ? "Each region's m_generation: none is outside every generation; immortal is generation 3 and is never collected" : "The generation list that holds each region; LOH and POH are collected with gen2") {
+                section("By generation", detail: heap.kind.gc == .satori ? "Each region's m_generation: none is outside every generation; immortal is generation 3 and is never collected" : heap.kind.usesSegments ? "Segments are split at generation boundaries; counts refer to those ranges. LOH and POH are collected with gen2." : "The generation list that holds each region; LOH and POH are collected with gen2") {
                     StackedBytesChart(stats: snapshot.generationStats)
-                    RegionStatsTable(stats: snapshot.generationStats, gc: heap.kind.gc)
+                    RegionStatsTable(stats: snapshot.generationStats, kind: heap.kind)
                 }
                 section(heap.kind.gc == .satori ? "By containing queue" : "By GC heap", detail: heap.kind.gc == .satori ? "The Satori queue that holds each region; hover a name for what it means" : "Generation lists of each server GC heap") {
                     StackedBytesChart(stats: snapshot.queueStats, queueNames: true)
-                    RegionStatsTable(stats: snapshot.queueStats, queueNames: true)
+                    RegionStatsTable(stats: snapshot.queueStats, queueNames: true, kind: heap.kind)
                 }
-                section("Live occupancy of 2 MB regions", detail: "Region count per live bytes / region size bucket") {
-                    OccupancyChart(histograms: snapshot.occupancyStats)
+                if !snapshot.occupancyStats.isEmpty {
+                    section("Live occupancy of 2 MB regions", detail: "Region count per live bytes / region size bucket") {
+                        OccupancyChart(histograms: snapshot.occupancyStats)
+                    }
                 }
-                section("By region size", detail: "Regions larger than 2 MB hold one object that does not fit in 2 MB, the finalization queue's array, or a free range in the allocator") {
-                    RegionStatsTable(stats: snapshot.sizeClassStats)
+                section(heap.kind.usesSegments ? "By range size" : "By region size", detail: heap.kind.gc == .satori ? "Regions larger than 2 MB hold one object that does not fit in 2 MB, the finalization queue's array, or a free range in the allocator" : heap.kind.usesSegments ? "Segment ranges grouped by size after splitting at generation boundaries" : "Regions grouped by reserved size") {
+                    RegionStatsTable(stats: snapshot.sizeClassStats, kind: heap.kind)
                 }
             }
             .padding(PageInsets.content)
@@ -239,6 +264,7 @@ struct ResidencyView: View {
                             .foregroundStyle(by: .value("Pages", "Regular pages"))
                     }
                     .chartForegroundStyleScale(["Huge pages": Color.blue.opacity(0.7), "Regular pages": Palette.free])
+                    .modifier(HorizontalBarAxes())
                     .chartLegend(macos ? .hidden : .visible)
                     .chartXAxisLabel("RSS MB")
                     .frame(height: CGFloat(rows.filter { $0.rss > 1 << 20 }.count) * 30 + 50)

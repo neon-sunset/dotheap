@@ -899,6 +899,11 @@ pub unsafe extern "C" fn dh_GcHandle_target(pointer: *const c_void) -> *const c_
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_GcState_uses_regions(pointer: *const c_void) -> bool {
+    unsafe { (*pointer.cast::<GcState>()).uses_regions }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_GcState_dynamic_adaptation(pointer: *const c_void) -> *const c_void {
     unsafe { (&(*pointer.cast::<GcState>()).dynamic_adaptation as *const Option<bool>).cast() }
 }
@@ -4922,10 +4927,18 @@ pub unsafe extern "C" fn dh_read_Option_OwnerEntry(pointer: *const c_void) -> *c
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn dh_OwnerTreeView_has_children(
+    pointer: *const c_void,
+    node: usize,
+) -> bool {
+    unsafe { (&*pointer.cast::<OwnerTreeView>()).has_children(node) }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dh_OwnerTreeView_children(pointer: *const c_void, node: usize) -> Outcome {
     unsafe {
         ffi::call(|| {
-            Ok(Owned::new(
+            Ok(Owned::arc(
                 (&*pointer.cast::<OwnerTreeView>()).children(node),
             ))
         })
@@ -4936,7 +4949,7 @@ pub unsafe extern "C" fn dh_OwnerTreeView_children(pointer: *const c_void, node:
 pub unsafe extern "C" fn dh_OwnerTreeView_groups(pointer: *const c_void, node: usize) -> Outcome {
     unsafe {
         ffi::call(|| {
-            Ok(Owned::new(
+            Ok(Owned::arc(
                 (&*pointer.cast::<OwnerTreeView>()).groups(node)?,
             ))
         })

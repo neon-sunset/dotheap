@@ -12,6 +12,7 @@ struct TableSort: Equatable {
 /// takes seconds. The table sorts its rows when they or the sort change, not on each update. Without a sort, the rows
 /// keep their order.
 struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
+    @Environment(\.typeNameStyle) private var typeNameStyle
     enum CellFont { case regular, monospaced, digits }
 
     struct Column {
@@ -22,7 +23,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
         let flexible: Bool
         let font: CellFont
         let truncation: NSLineBreakMode
-        let typeNameStyle: TypeNameStyle?
+        let isTypeName: ((Row) -> Bool)?
         let text: (Row) -> String
         let color: ((Row) -> NSColor?)?
         let help: ((Row) -> String)?
@@ -39,22 +40,22 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
 
         init<V: Comparable>(_ title: String, width: CGFloat, minWidth: CGFloat = 40, flexible: Bool = false, font: CellFont = .regular,
                             truncation: NSLineBreakMode = .byTruncatingTail, value: @escaping (Row) -> V, text: @escaping (Row) -> String,
-                            color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, typeNameStyle: TypeNameStyle? = nil) {
+                            color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, isTypeName: ((Row) -> Bool)? = nil) {
             self.init(title, width: width, minWidth: minWidth, flexible: flexible, font: font, truncation: truncation, ascending: { value($0) < value($1) },
-                      text: text, color: color, help: help, typeNameStyle: typeNameStyle)
+                      text: text, color: color, help: help, isTypeName: isTypeName)
         }
 
         /// A column that does not sort.
         init(_ title: String, width: CGFloat, minWidth: CGFloat = 40, flexible: Bool = false, font: CellFont = .regular,
              truncation: NSLineBreakMode = .byTruncatingTail, ascending: ((Row, Row) -> Bool)? = nil, text: @escaping (Row) -> String,
-             color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, typeNameStyle: TypeNameStyle? = nil) {
+             color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, isTypeName: ((Row) -> Bool)? = nil) {
             self.title = title
             self.width = width
             self.minWidth = minWidth
             self.flexible = flexible
             self.font = font
             self.truncation = truncation
-            self.typeNameStyle = typeNameStyle
+            self.isTypeName = isTypeName
             self.text = text
             self.color = color
             self.help = help
@@ -111,7 +112,8 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
-        let styleChanged = c.parent.columns.map(\.typeNameStyle) != columns.map(\.typeNameStyle)
+        let styleChanged = c.style != typeNameStyle
+        c.style = typeNameStyle
         c.parent = self
         if let table = c.table {
             if table.numberOfColumns != columns.count {
@@ -138,6 +140,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
         var sorted = AnyRandomAccessCollection<Row>([])
         var sort: TableSort?
         var applied = false
+        var style = TypeNameStyle.standard
         private var rowOfId: [ID: Int] = [:]
         private var updating = false
         private var fitting = false
@@ -262,14 +265,17 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
                 view.segments = bar(r)
                 return view
             }
-            let cell = tableView.makeView(withIdentifier: tableColumn.identifier, owner: nil) as? NSTableCellView ?? makeCell(tableColumn.identifier, column)
-            if let field = cell.textField as? TypeNameField, let style = column.typeNameStyle {
-                field.name = column.text(r)
-                field.style = style
+            let identifier = NSUserInterfaceItemIdentifier(tableColumn.identifier.rawValue + (column.isTypeName == nil ? "/text" : "/type"))
+            let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? NSTableCellView ?? makeCell(identifier, column)
+            let text = column.text(r), isTypeName = column.isTypeName?(r) == true
+            if let field = cell.textField as? TypeNameField {
+                field.name = text
+                field.style = isTypeName ? style : .standard
                 field.needsLayout = true
-            } else { cell.textField?.stringValue = column.text(r) }
+                field.setAccessibilityValue(field.name)
+            } else { cell.textField?.stringValue = text }
             cell.textField?.textColor = column.color?(r) ?? .labelColor
-            cell.textField?.toolTip = column.help?(r)
+            cell.textField?.toolTip = column.help?(r) ?? (isTypeName ? text : nil)
             return cell
         }
 
@@ -277,7 +283,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
             let cell = NSTableCellView()
             cell.identifier = identifier
             let text: NSTextField
-            if column.typeNameStyle != nil {
+            if column.isTypeName != nil {
                 let field = TypeNameField(labelWithString: "")
                 field.singleLine = true
                 text = field

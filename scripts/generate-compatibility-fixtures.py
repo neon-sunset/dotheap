@@ -321,6 +321,12 @@ def generate(folder):
     for architecture in (62, 183):
         for mode in ("workstation-regions", "workstation-segments", "server-regions"):
             coreclr(folder / f"coreclr-{architecture}-{mode}.dmp", architecture, mode)
+        for name, mode, end in (
+            ("2mb-region", "workstation-regions", (contract.FIRST & ~4095) + 2 * 1024 * 1024),
+            ("2mb-segment-range", "workstation-segments", contract.FIRST + 136 + 2 * 1024 * 1024),
+            ("cross-page-segment", "workstation-segments", contract.FIRST + 2 * 1024 * 1024 * 1024),
+        ):
+            coreclr(folder / f"coreclr-{architecture}-{name}.dmp", architecture, mode, end)
         for name, address in (("below", 0x20000000), ("between", 0x40100000), ("above", 0x50000000)):
             stack_roots(folder / f"stack-roots-{architecture}-{name}.dmp", architecture, address)
         for mode in ("regular", "large", "shared", "bad-backpointer", "missing-descriptor",
@@ -407,7 +413,7 @@ def stack_roots(path, architecture, address):
     path.write_bytes(data)
 
 
-def coreclr(path, architecture, mode):
+def coreclr(path, architecture, mode, reserved_end=None):
     contract.core(path, rooted=True, refs={8: 1})
     data = bytearray(path.read_bytes())
     page, image, first = contract.PAGE, contract.IMAGE, contract.FIRST
@@ -440,7 +446,7 @@ def coreclr(path, architecture, mode):
     put(table + 2 * 64 + 16, segment)
     put(segment, first + 160)
     put(segment + 8, contract.REGION + 0x10000)
-    put(segment + 16, contract.REGION + 0x10000)
+    put(segment + 16, reserved_end or contract.REGION + 0x10000)
     put(segment + 32, first)
     # The allocation context covers the free gap between the first and second objects.
     put(table, first + 32)

@@ -132,11 +132,15 @@ impl OwnerTreeView {
         Ok(self.tree.entry(&self.snapshot, node)?)
     }
 
-    pub fn children(&self, node: Index) -> Vec<Index> {
+    pub fn has_children(&self, node: Index) -> bool {
+        self.tree.has_children(&self.snapshot, node)
+    }
+
+    pub fn children(&self, node: Index) -> Arc<Vec<Index>> {
         self.tree.children(&self.snapshot, node)
     }
 
-    pub fn groups(&self, node: Index) -> Result<Vec<OwnershipGroup>> {
+    pub fn groups(&self, node: Index) -> Result<Arc<Vec<OwnershipGroup>>> {
         Ok(self.tree.groups(&self.snapshot, node)?)
     }
 

@@ -47,6 +47,75 @@ final class NavigationTests: XCTestCase {
         return view.subviews.lazy.compactMap { self.firstView(type, in: $0) }.first
     }
 
+    @MainActor func testDominatorAddressFitsAndSharesTheNameBaseline() throws {
+        _ = NSApplication.shared
+        let snapshot = try snapshot()
+        let entry = try snapshot.ownerTree().entry(snapshot.ownership.objectNode(0))
+        let cell = DominatorCell()
+        for width: CGFloat in [900, 1400] {
+            for value: UInt64 in [0x75cd63d0, 0x7fff123456789abc] {
+                cell.frame = NSRect(x: 0, y: 0, width: width, height: 24)
+                cell.configure(name: "System.Text.RegularExpressions.Symbolic.SymbolicRegexMatcher`1<System.UInt64>",
+                               style: .standard, symbol: "", color: .labelColor, entry: entry, address: value,
+                               depth: 3, expandable: true, expanded: false, size: 88, managed: 1000, native: 0,
+                               nativeOwner: false, total: 1000, wide: true, compact: false, more: false,
+                               toggle: {}, inspect: {})
+                cell.layoutSubtreeIfNeeded()
+                let name = try XCTUnwrap(cell.subviews.compactMap { $0 as? TypeNameField }.first)
+                let address = try XCTUnwrap(cell.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == Format.hex(value) })
+                let button = try XCTUnwrap(cell.subviews.first { $0.identifier?.rawValue == "inspect" })
+                let nameRect = name.alignmentRect(forFrame: name.frame)
+                let addressRect = address.alignmentRect(forFrame: address.frame)
+                XCTAssertGreaterThanOrEqual(addressRect.width, address.intrinsicContentSize.width)
+                XCTAssertGreaterThanOrEqual(addressRect.height, address.intrinsicContentSize.height)
+                XCTAssertEqual(addressRect.maxY - address.firstBaselineOffsetFromTop,
+                               nameRect.maxY - name.firstBaselineOffsetFromTop, accuracy: 0.01)
+                XCTAssertLessThanOrEqual(name.frame.maxX, address.frame.minX)
+                XCTAssertLessThanOrEqual(address.frame.maxX, button.frame.minX)
+            }
+        }
+    }
+
+    @MainActor func testDominatorRowsExpandAndInspectSeparately() async throws {
+        let snapshot = try snapshot(), session = Session(), pages = PageContainer(), window = window(pages)
+        let graph = try snapshot.ownerTree()
+        defer { window.close() }
+        pages.show(.dominators, snapshot: snapshot) {
+            DominatorTree(snapshot: snapshot, graph: graph, groupByType: true, wide: true).environment(session)
+        }
+        try await settle(pages)
+        let table = try XCTUnwrap(firstView(NSTableView.self, in: pages))
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        try await settle(pages)
+        let count = table.numberOfRows
+        XCTAssertGreaterThan(count, 1)
+        func click(_ point: NSPoint) throws {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                            windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+                NSApp.sendEvent(event)
+            }
+        }
+        let rootPoint = table.convert(NSPoint(x: 250, y: table.rect(ofRow: 0).midY), to: nil)
+        try click(rootPoint)
+        try await settle(pages)
+        XCTAssertEqual(table.numberOfRows, 1)
+        XCTAssertNil(session.inspectedObject)
+        try click(rootPoint)
+        try await settle(pages)
+        XCTAssertEqual(table.numberOfRows, count)
+        func inspectButton(_ view: NSView) -> NSButton? {
+            if let button = view as? NSButton, button.identifier?.rawValue == "inspect", !button.isHidden { return button }
+            return view.subviews.lazy.compactMap(inspectButton).first
+        }
+        let button = try XCTUnwrap(inspectButton(table))
+        try click(button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil))
+        try await settle(pages)
+        XCTAssertNotNil(session.inspectedObject)
+        XCTAssertEqual(table.numberOfRows, count)
+    }
+
     @MainActor func testPageObservesSessionAppearanceAndResize() async throws {
         let snapshot = try snapshot(), session = Session(), probe = Probe()
         let pages = PageContainer(), window = window(pages)

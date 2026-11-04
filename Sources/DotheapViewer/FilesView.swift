@@ -118,7 +118,7 @@ struct FilesView: View {
                 .init("Now", width: 120, minWidth: 60, value: \.now, text: \.now,
                       color: { $0.managed?.pending != nil ? NSColor(Palette.queued) : .secondaryLabelColor },
                       help: { _ in "Extra handle references can come from active I/O or DangerousAddRef, including a file mapping. They do not by themselves prove that an I/O operation is pending." }),
-                .init("Held by", width: 220, minWidth: 100, truncation: .byTruncatingMiddle, value: \.heldBy, text: \.heldBy, help: { $0.heldBy }),
+                .init("Held by", width: 220, minWidth: 100, truncation: .byTruncatingMiddle, value: \.heldBy, text: \.heldBy, help: { $0.heldBy }, isTypeName: { $0.managed != nil }),
             ], sort: $openOrder, selection: selectedFile, select: { selectedFile = $0 })
         } second: {
             if let r = rows.first(where: { $0.id == selectedFile }) { FileDetail(snapshot: snapshot, row: r).id(r.id) } else { Placeholder("Select a file.") }

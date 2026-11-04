@@ -58,6 +58,19 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(clicks, 1)
     }
 
+    @MainActor func testTypeNameMeasurementUpdatesForNameAndFont() {
+        let field = TypeNameField(labelWithString: "")
+        field.font = .systemFont(ofSize: 12)
+        field.name = "Task"
+        let first = field.size(for: nil)
+        field.name = "System.Threading.Tasks.Task"
+        let longer = field.size(for: nil)
+        XCTAssertGreaterThan(longer.width, first.width)
+        field.font = .systemFont(ofSize: 20)
+        XCTAssertGreaterThan(field.size(for: nil).width, longer.width)
+        XCTAssertGreaterThan(field.size(for: nil).height, longer.height)
+    }
+
     @MainActor func testTypeNameExpandsWhenTheFieldGetsWider() {
         let field = TypeNameField(labelWithString: "")
         field.font = .systemFont(ofSize: NSFont.systemFontSize)
@@ -69,6 +82,67 @@ final class DisplayTests: XCTestCase {
         field.frame.size.width = 400
         field.layoutSubtreeIfNeeded()
         XCTAssertEqual(field.stringValue, field.name)
+    }
+
+    @MainActor func testTableTypeNamesFollowSettingsAndColumnWidth() async throws {
+        _ = NSApplication.shared
+        struct Row: Identifiable {
+            let id: Int
+            let name: String
+            let managed: Bool
+        }
+        let name = "System.Collections.Generic.Dictionary<System.String, Example.Cache.Entry>"
+        let path = "/usr/local/lib/Example.Native.Library.dylib"
+        let rows = [Row(id: 0, name: name, managed: true), Row(id: 1, name: path, managed: false)]
+        func content(_ style: TypeNameStyle) -> some View {
+            TextTable(rows: rows, columns: [
+                .init("Type or source", width: 190, flexible: true, value: \.name, text: \.name, isTypeName: \.managed),
+                .init("Path", width: 180, text: { _ in path }),
+            ], sort: .constant(nil), selection: 0, select: { _ in })
+                .environment(\.typeNameStyle, style)
+        }
+        let host = NSHostingView(rootView: content(.standard))
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: 0, width: 420, height: 200),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        func table(in view: NSView) -> NSTableView? {
+            (view as? NSTableView) ?? view.subviews.lazy.compactMap { table(in: $0) }.first
+        }
+        func settle() async throws {
+            for _ in 0..<4 {
+                host.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        try await settle()
+        let table = try XCTUnwrap(table(in: host))
+        func field(_ column: Int, _ row: Int) throws -> NSTextField {
+            try XCTUnwrap((table.view(atColumn: column, row: row, makeIfNecessary: true) as? NSTableCellView)?.textField)
+        }
+        XCTAssertEqual(try field(0, 0).stringValue, name)
+        host.rootView = content(.initials)
+        try await settle()
+        XCTAssertEqual(try field(0, 0).stringValue, "S.C.G.Dictionary<S.String, E.C.Entry>")
+        XCTAssertEqual(try field(0, 0).toolTip, name)
+        XCTAssertEqual(try field(0, 1).stringValue, path)
+        XCTAssertEqual(try field(1, 0).stringValue, path)
+        XCTAssertEqual(table.selectedRow, 0)
+
+        window.setContentSize(NSSize(width: 1100, height: 200))
+        try await settle()
+        XCTAssertEqual(try field(0, 0).stringValue, name)
+        window.setContentSize(NSSize(width: 420, height: 200))
+        try await settle()
+        XCTAssertEqual(try field(0, 0).stringValue, "S.C.G.Dictionary<S.String, E.C.Entry>")
+        for style in [TypeNameStyle.expanded, .standard] {
+            host.rootView = content(style)
+            try await settle()
+            XCTAssertEqual(try field(0, 0).stringValue, name)
+            XCTAssertEqual(table.selectedRow, 0)
+        }
     }
 
     @MainActor func testWrappedNamesHaveRoomForEveryLine() async throws {

@@ -85,7 +85,7 @@ struct NetworkView: View {
                 TableColumn("Sockets", value: \SocketGroup.count) { g in Text(g.sockets.count.formatted()).monospacedDigit() }.width(min: 40, ideal: 50)
                 TableColumn("Kind", value: \SocketGroup.kind) { g in Text(g.parts[0]).foregroundStyle(Self.color(g.parts[0])) }.width(min: 60, ideal: 80)
                 TableColumn("Transport", value: \SocketGroup.transport) { g in Text(g.parts[1]) }.width(min: 50, ideal: 80)
-                TableColumn("Owner", value: \SocketGroup.owner) { g in Text(g.parts[2]).lineLimit(2).help(g.parts[2]) }.width(min: 100, ideal: 200)
+                TableColumn("Owner", value: \SocketGroup.owner) { g in TypeNameText(name: g.parts[2], singleLine: true) }.width(min: 100, ideal: 200)
                 TableColumn("Other side", value: \SocketGroup.peer) { g in Text(g.parts[3]).lineLimit(2).help(g.parts[3]) }.width(min: 100, ideal: 180)
                 TableColumn("Receives", value: \SocketGroup.receives) { g in Text(g.receives.formatted()).monospacedDigit().foregroundStyle(g.receives > 0 ? .primary : .secondary) }.width(min: 40, ideal: 60)
                 TableColumn("Sends", value: \SocketGroup.sends) { g in Text(g.sends.formatted()).monospacedDigit().foregroundStyle(g.sends > 0 ? .primary : .secondary) }.width(min: 40, ideal: 50)
@@ -144,7 +144,7 @@ struct NetworkView: View {
                     .init("Host", width: 220, minWidth: 120, flexible: true, truncation: .byTruncatingMiddle, value: \.host, text: \.host, help: { $0.host }),
                     .init("Kind", width: 70, minWidth: 50, value: \.kind, text: { $0.kind + ($0.proxy.map { " " + $0 } ?? "") }, help: { $0.proxy ?? "" }),
                     .init("Handler held by", width: 240, minWidth: 120, truncation: .byTruncatingMiddle, value: \.handlerOwner, text: \.handlerOwner,
-                          help: { $0.handlerOwner }),
+                          help: { $0.handlerOwner }, isTypeName: { _ in true }),
                     .init("Connections", width: 120, minWidth: 80, font: .digits, value: \.connections, text: { Self.connections($0) }),
                     .init("Active requests", width: 100, minWidth: 60, font: .digits, value: \.active, text: { $0.active.formatted() }),
                     .init("Queued requests", width: 100, minWidth: 60, font: .digits,

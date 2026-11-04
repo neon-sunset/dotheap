@@ -133,7 +133,7 @@ struct RegionDetailView: View {
         SplitPanes(axis: .horizontal, firstMin: 320, secondMin: 360, firstIdeal: 380) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Region \(Format.hex(r.start))").font(.title3.weight(.semibold))
+                    Text("\(heap.kind.usesSegments ? "Segment range" : "Region") \(Format.hex(r.start))").font(.title3.weight(.semibold))
                     RegionStrip(snapshot: snapshot, regionIndex: regionIndex).frame(height: 36)
                     ColorLegend(items: [("Live", Palette.live), ("Pending finalization", Palette.pending), ("Dead", Palette.dead), ("Gaps", Palette.free),
                                         ("GC storage", Palette.gcStorage), ("Header", Palette.headers), (satori ? "Committed, unused (above m_used, all zero)" : "Committed, above allocated", Palette.committedUnused), ("Uncommitted", Palette.uncommitted)])
@@ -173,7 +173,7 @@ struct RegionDetailView: View {
                     Computed(snapshot, key: "region types \(regionIndex)", label: "Counting types", compute: { try $0.regionTypes(regionIndex) }) { (types: RustArray<HeapSnapshot.TypeGroup>) in
                         ForEach(types.prefix(12)) { t in
                             HStack {
-                                Text(TypeNames.short(t.name)).lineLimit(1).truncationMode(.middle)
+                                TypeNameText(name: TypeNames.short(t.name), singleLine: true)
                                 Spacer()
                                 Text("\(t.objects) × \(Format.bytes(t.bytes))").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                             }
@@ -192,7 +192,7 @@ struct RegionDetailView: View {
             }) { (all: [ObjectRow]) in
                 TextTable(rows: all, columns: [
                     .init("Address", width: 125, font: .monospaced, value: \.address, text: { Format.hex($0.address) }),
-                    .init("Type", width: 200, flexible: true, value: \.type, text: \.type),
+                    .init("Type", width: 200, flexible: true, value: \.type, text: \.type, isTypeName: { _ in true }),
                     .init("Size", width: 80, font: .digits, value: \.size, text: { Format.bytes($0.size) }),
                     .init("Retained", width: 80, font: .digits, value: \.retained, text: { Format.bytes($0.retained) }),
                     .init("State", width: 45, value: \.stateOrder, text: \.state, color: { NSColor(Palette.state($0.objectState)) }),
@@ -241,6 +241,6 @@ struct RegionStrip: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 3))
-        .help("Address range of the region. Bar height is the share of each pixel's bytes held by live, pending finalization and dead objects.")
+        .help("Bar height is the share of each pixel's bytes held by live, pending finalization and dead objects in this address range.")
     }
 }

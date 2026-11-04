@@ -702,11 +702,13 @@ public struct GcState: @unchecked Sendable, Equatable {
     let _pointer: UnsafeRawPointer
     let _owner: RustOwner
     init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var usesRegions: Bool { withExtendedLifetime(_owner) { dh_GcState_uses_regions(_pointer) } }
     public var dynamicAdaptation: Bool? { withExtendedLifetime(_owner) { read_Option_bool(dh_GcState_dynamic_adaptation(_pointer)!, _owner) } }
     public var background: Bool { withExtendedLifetime(_owner) { dh_GcState_background(_pointer) } }
     public static func == (lhs: Self, rhs: Self) -> Bool {
         if lhs._pointer == rhs._pointer { return true }
-        return lhs.dynamicAdaptation == rhs.dynamicAdaptation &&
+        return lhs.usesRegions == rhs.usesRegions &&
+            lhs.dynamicAdaptation == rhs.dynamicAdaptation &&
             lhs.background == rhs.background
     }
 }
@@ -730,6 +732,8 @@ public struct Granule: @unchecked Sendable, Equatable {
     let _pointer: UnsafeRawPointer
     let _owner: RustOwner
     init(pointer: UnsafeRawPointer, owner: RustOwner) { _pointer = pointer; _owner = owner }
+    public var address: UInt64 { withExtendedLifetime(_owner) { _pointer.assumingMemoryBound(to: DHGranule.self).pointee.address } }
+    public var size: UInt32 { withExtendedLifetime(_owner) { _pointer.assumingMemoryBound(to: DHGranule.self).pointee.size } }
     public var region: Int32 { withExtendedLifetime(_owner) { _pointer.assumingMemoryBound(to: DHGranule.self).pointee.region } }
     public var live: UInt32 { withExtendedLifetime(_owner) { _pointer.assumingMemoryBound(to: DHGranule.self).pointee.live } }
     public var pending: UInt32 { withExtendedLifetime(_owner) { _pointer.assumingMemoryBound(to: DHGranule.self).pointee.pending } }
@@ -741,7 +745,9 @@ public struct Granule: @unchecked Sendable, Equatable {
     public var isRegionStart: Bool { withExtendedLifetime(_owner) { _pointer.assumingMemoryBound(to: DHGranule.self).pointee.is_region_start } }
     public static func == (lhs: Self, rhs: Self) -> Bool {
         if lhs._pointer == rhs._pointer { return true }
-        return lhs.region == rhs.region &&
+        return lhs.address == rhs.address &&
+            lhs.size == rhs.size &&
+            lhs.region == rhs.region &&
             lhs.live == rhs.live &&
             lhs.pending == rhs.pending &&
             lhs.dead == rhs.dead &&
@@ -3995,6 +4001,11 @@ public final class OwnerTreeView: @unchecked Sendable {
         return try withExtendedLifetime((owner)) {
             let result = try take(dh_OwnerTreeView_entry(pointer, UInt(node)))
             return withExtendedLifetime(result) { read_Option_OwnerEntry(result.pointer, result) }
+        }
+    }
+    public func hasChildren(node: Int) -> Bool {
+        return withExtendedLifetime((owner)) {
+            return dh_OwnerTreeView_has_children(pointer, UInt(node))
         }
     }
     public func children(node: Int) -> RustArray<Int> {

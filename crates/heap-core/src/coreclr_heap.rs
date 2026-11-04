@@ -258,7 +258,10 @@ fn discover(
             }
         }
     }
-    let mut gc = GcState::default();
+    let mut gc = GcState {
+        uses_regions: regions_build,
+        ..GcState::default()
+    };
     if regions_build && minor >= 2 {
         let kinds = dump.u32(g + 24 + 35 * 8 + 4).unwrap_or(3).min(3) as usize;
         let kind_names = ["basic", "large", "huge"];

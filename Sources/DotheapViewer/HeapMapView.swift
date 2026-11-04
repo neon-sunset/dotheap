@@ -44,6 +44,7 @@ struct HeapMapView: View {
     @AppStorage("heapMapColoring") private var coloring: MapColoring = .bytes
     @AppStorage("heapMapCell") private var cell: Double = 14
     @State private var hoverRegion: Int?
+    @State private var selectionFromMap: Int?
     @State private var showEmpty = false
 
     var body: some View {
@@ -56,13 +57,15 @@ struct HeapMapView: View {
                     let columns = max(8, Int((geo.size.width - 2 * PageInsets.content) / cell))
                     ScrollViewReader { proxy in
                         ScrollView(.vertical) {
-                            let selectedPage = session.selectedRegion.flatMap(page(of:)), hoverPage = hoverRegion.flatMap(page(of:))
                             LazyVStack(alignment: .leading, spacing: 14) {
                                 ForEach(Array(snapshot.heap.pages.enumerated()), id: \.offset) { p, page in
                                     if p < granules.count, showEmpty || granules[p].contains(where: { $0.committed > 0 }) {
                                         PageGrid(snapshot: snapshot, page: page, cells: granules[p], coloring: mode, cell: cell, columns: columns,
-                                                 selected: selectedPage == p ? session.selectedRegion : nil, hover: hoverPage == p ? hoverRegion : nil,
-                                                 setHover: { hoverRegion = $0 }, select: { session.selectedRegion = $0 })
+                                                 selected: intersecting(session.selectedRegion, page: page), hover: intersecting(hoverRegion, page: page),
+                                                 setHover: { hoverRegion = $0 }, select: {
+                                                     selectionFromMap = $0
+                                                     session.selectedRegion = $0
+                                                 })
                                             .equatable()
                                             .id(p)
                                     }
@@ -72,6 +75,8 @@ struct HeapMapView: View {
                         }
                         // A region opened from elsewhere: bring its page into view.
                         .onChange(of: session.selectedRegion, initial: true) {
+                            defer { selectionFromMap = nil }
+                            guard session.selectedRegion != selectionFromMap else { return }
                             guard let r = session.selectedRegion, let p = snapshot.heap.pages.firstIndex(where: { snapshot.heap.regions[r].start >= $0.start && snapshot.heap.regions[r].start < $0.end }) else { return }
                             withAnimation { proxy.scrollTo(p, anchor: .top) }
                         }
@@ -116,11 +121,11 @@ struct HeapMapView: View {
                     HStack(spacing: 4) {
                         LinearGradient(colors: [Palette.generation("gen2").opacity(0.35), Palette.generation("gen2")], startPoint: .leading, endPoint: .trailing)
                             .frame(width: 40, height: 10).clipShape(RoundedRectangle(cornerRadius: 2))
-                        Text("dim to bright: share of the granule that is live").font(.caption).fixedSize()
+                        Text("dim to bright: share of each cell part that is live").font(.caption).fixedSize()
                     }
                     HStack(spacing: 4) {
                         RoundedRectangle(cornerRadius: 2).fill(Palette.uncommitted).frame(width: 10, height: 10)
-                        Text("no region or uncommitted").font(.caption).fixedSize()
+                        Text(snapshot.heap.kind.usesSegments ? "outside heap ranges or uncommitted" : "no region or uncommitted").font(.caption).fixedSize()
                     }
                 }
             case .queue:
@@ -137,9 +142,10 @@ struct HeapMapView: View {
 
     private func legend(_ items: [(String, Color)]) -> some View { ColorLegend(items: items) }
 
-    private func page(of region: Int) -> Int? {
-        let start = snapshot.heap.regions[region].start
-        return snapshot.heap.pages.firstIndex { start >= $0.start && start < $0.end }
+    private func intersecting(_ region: Int?, page: Page) -> Int? {
+        guard let region else { return nil }
+        let r = snapshot.heap.regions[region]
+        return r.start < page.end && r.end > page.start ? region : nil
     }
 
     private var gc: HeapKind.GC { snapshot.heap.kind.gc }
@@ -154,7 +160,8 @@ struct HeapMapView: View {
                 Text("\(Format.hex(r.start))  \(Format.mb(r.size))  \(r.generationName)  \(Glossary.queue(r.queue).name)\(i < kinds.count ? "  " + kinds[i] : "")  used \(Format.mb(r.usedBytes))  live \(Format.mb(r.liveBytes))\(r.pendingBytes > 0 ? "  pending finalization " + Format.mb(r.pendingBytes) : "")  dead \(Format.mb(r.deadBytes))  free \(Format.mb(r.freeBytes))  \(r.endObject - r.firstObject) objects")
                     .font(.caption.monospacedDigit())
             } else {
-                Text("Each cell is a 2 MB granule. Click a region for its layout and objects.").font(.caption).foregroundStyle(.secondary)
+                Text(gc == .satori ? "Each cell is a 2 MB granule. Click a region for its layout and objects." : "Each square spans 2 MB. Boundaries divide a square in proportion to the address ranges it contains. Click a range for its layout and objects.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
         }
@@ -188,7 +195,7 @@ struct PageGrid: View, Equatable {
             Text("\(snapshot.heap.kind.gc == .satori ? "Page" : "Range") \(Format.hex(page.start)) – \(Format.mb(page.end - page.start)), committed \(Format.mb(committed))")
                 .font(.caption.weight(.medium)).foregroundStyle(.secondary)
             Canvas { ctx, _ in draw(ctx, columns: columns) }
-                .frame(width: CGFloat(columns) * cell, height: CGFloat((cells.count + columns - 1) / columns) * cell)
+                .frame(width: CGFloat(columns) * cell, height: CGFloat((Int((page.end - page.start + ManagedHeap.granule - 1) / ManagedHeap.granule) + columns - 1) / columns) * cell)
                 .onContinuousHover { phase in
                     if case let .active(p) = phase { setHover(region(at: p, columns: columns)) } else { setHover(nil) }
                 }
@@ -198,22 +205,29 @@ struct PageGrid: View, Equatable {
 
 
     private func region(at p: CGPoint, columns: Int) -> Int? {
+        guard p.x >= 0, p.y >= 0, p.x < CGFloat(columns) * cell else { return nil }
         let k = Int(p.y / cell) * columns + Int(p.x / cell)
-        guard p.x >= 0, k >= 0, k < cells.count, cells[k].region >= 0 else { return nil }
-        return Int(cells[k].region)
+        let fraction = min(max((p.x.truncatingRemainder(dividingBy: cell) - 0.5) / (cell - 1), 0), 1)
+        let address = page.start + UInt64(k) * ManagedHeap.granule + min(UInt64(fraction * CGFloat(ManagedHeap.granule)), ManagedHeap.granule - 1)
+        guard address < page.end else { return nil }
+        return snapshot.heap.region(containing: address)
     }
 
     private func draw(_ ctx: GraphicsContext, columns: Int) {
-        let g = Double(ManagedHeap.granule)
         let kinds = coloring == .kind ? snapshot.satoriRegionKinds : RustArray<String>()
-        for (k, c) in cells.enumerated() {
+        for c in cells {
+            let offset = c.address - page.start
+            let k = Int(offset / ManagedHeap.granule)
             let x = CGFloat(k % columns) * cell, y = CGFloat(k / columns) * cell
-            let rect = CGRect(x: x + 0.5, y: y + 0.5, width: cell - 1, height: cell - 1)
+            let fraction = CGFloat(offset % ManagedHeap.granule) / CGFloat(ManagedHeap.granule)
+            let rect = CGRect(x: x + 0.5 + fraction * (cell - 1), y: y + 0.5,
+                              width: CGFloat(c.size) / CGFloat(ManagedHeap.granule) * (cell - 1), height: cell - 1)
             guard c.region >= 0 else {
                 ctx.fill(Path(rect), with: .color(.secondary.opacity(0.05)))
                 continue
             }
             let r = snapshot.heap.regions[Int(c.region)]
+            let g = Double(c.size)
             ctx.fill(Path(rect), with: .color(Palette.uncommitted))
             switch coloring {
             case .bytes:
@@ -234,7 +248,7 @@ struct PageGrid: View, Equatable {
                 ctx.fill(Path(rect), with: .color(Palette.satoriKind(kind).opacity(c.committed > 0 ? 1 : 0.2)))
             }
             if c.isRegionStart {
-                ctx.fill(Path(CGRect(x: rect.minX, y: rect.minY, width: 1.5, height: rect.height)), with: .color(.primary.opacity(0.6)))
+                ctx.fill(Path(CGRect(x: rect.minX, y: rect.minY, width: min(1.5, rect.width), height: rect.height)), with: .color(.primary.opacity(0.6)))
             }
             if Int(c.region) == selected || Int(c.region) == hover {
                 ctx.stroke(Path(rect), with: .color(Int(c.region) == selected ? .accentColor : .primary.opacity(0.5)), lineWidth: 1.5)

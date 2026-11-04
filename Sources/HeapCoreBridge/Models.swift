@@ -46,7 +46,10 @@ extension CheckReport {
     public typealias Section = CheckSection
 }
 
-extension HeapKind { public typealias GC = Gc }
+extension HeapKind {
+    public typealias GC = Gc
+    public var usesSegments: Bool { gc == .coreClr && stock?.usesRegions == false }
+}
 extension RootSource { public typealias Kind = RootKind }
 extension SearchResult {
     public typealias Kind = SearchKind

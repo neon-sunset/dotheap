@@ -85,7 +85,7 @@ enum MemoryTree {
                     byGeneration(s, path: "unused", color: Palette.committedUnused) { $0.committedUnused }
                 },
                 MemoryNode(id: "gc-storage", name: "GC storage", detail: "committed space reserved for GC work chunks and finalization queue entries, including unused capacity", bytes: t.gcStorage, color: Palette.gcStorage),
-                MemoryNode(id: "headers", name: "Region headers", detail: s.heap.kind.gc == .satori ? "mark bitmap and index of each region" : "space the GC leaves before the first object of each region", bytes: headers, color: Palette.headers),
+                MemoryNode(id: "headers", name: "Headers", detail: s.heap.kind.gc == .satori ? "mark bitmap and index of each region" : "space the GC leaves before the first object of each heap range", bytes: headers, color: Palette.headers),
                 MemoryNode(id: "unparsed", name: "Unparsed", detail: s.heap.kind.gc == .satori ? "allocation ranges, zero tails and data whose purpose could not be established" : "allocation ranges and zero tails", bytes: t.unparsed, color: Palette.unparsed),
             ]
         }
@@ -136,7 +136,7 @@ enum MemoryTree {
         } else if let chunk = entry.chunk {
             detail = try Format.hex(s.nativeGraph.chunks[chunk].userStart) + ", " + detail
         } else if entry.kind == .type { detail = "declaring type; " + detail }
-        let hasChildren = !tree.children(of: node).isEmpty
+        let hasChildren = tree.hasChildren(node)
         return MemoryNode(id: path + "/\(node)", name: name, detail: detail,
                           bytes: managedOnly ? entry.managed : entry.managed + entry.native,
                           color: try ownerColor(s, entry, managedOnly: managedOnly), object: entry.object,
@@ -544,6 +544,8 @@ struct FindingsList: View {
                     }
                     .buttonStyle(.plain).font(.callout)
                 }
+            } else if let error = session.findingsError {
+                Text(error).font(.callout).foregroundStyle(.secondary)
             } else {
                 HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Preparing findings").font(.callout).foregroundStyle(.secondary) }
             }
