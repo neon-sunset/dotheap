@@ -89,6 +89,11 @@ final class NativeMemoryTests: XCTestCase {
         }
         let detail: ChunkDetail.Model = try XCTUnwrap(snapshot.memoized("native chunk \(selected)"))
         XCTAssertEqual(detail.details.chunk.size, 4096)
+        // The inspector must occupy its width before the window is resized.
+        try await wait(host) {
+            guard let groups = self.table(host, columns: ["Type or source", "Chunks", "Bytes"])?.enclosingScrollView else { return false }
+            return groups.convert(groups.bounds, to: host).maxX <= host.bounds.maxX - 340
+        }
         for width in [1200.0, 1700.0] {
             window.setContentSize(NSSize(width: width, height: 800))
             try await wait(host) {

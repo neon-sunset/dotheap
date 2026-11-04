@@ -71,6 +71,8 @@ pub struct DominatorGroup {
 #[serde(rename_all = "camelCase")]
 #[repr(C)]
 pub struct Granule {
+    pub address: u64,
+    pub size: u32,
     pub region: i32,
     pub live: u32,
     pub pending: u32,
@@ -84,6 +86,8 @@ pub struct Granule {
 impl Default for Granule {
     fn default() -> Self {
         Self {
+            address: 0,
+            size: GRANULE as u32,
             region: -1,
             live: 0,
             pending: 0,
@@ -665,67 +669,69 @@ impl HeapSnapshot {
         })
     }
     pub fn granule_map(&self) -> Vec<Vec<Granule>> {
-        let mut pages: Vec<Vec<Granule>> = self
-            .heap
+        let clip = |lo: u64, hi: u64, a: u64, b: u64| hi.min(b).saturating_sub(lo.max(a)) as u32;
+        self.heap
             .pages
             .iter()
-            .map(|p| vec![Granule::default(); ((p.end - p.start) / GRANULE) as usize])
-            .collect();
-        let clip = |lo: u64, hi: u64, a: u64, b: u64| hi.min(b).saturating_sub(lo.max(a)) as u32;
-        for r in &self.heap.regions {
-            let Some(p) = self
-                .heap
-                .pages
-                .iter()
-                .position(|p| r.start >= p.start && r.start < p.end)
-            else {
-                continue;
-            };
-            let base = self.heap.pages[p].start;
-            let first = ((r.start - base) / GRANULE) as usize;
-            let end = ((r.end - base).div_ceil(GRANULE) as usize).min(pages[p].len());
-            for (k, granule) in pages[p].iter_mut().enumerate().take(end).skip(first) {
-                let lo = r.start.max(base + k as u64 * GRANULE);
-                let hi = base + (k + 1) as u64 * GRANULE;
-                *granule = Granule {
-                    region: r.index as i32,
-                    is_region_start: k == first,
-                    header: if k == first {
-                        r.header_bytes().min(GRANULE) as u32
-                    } else {
-                        0
-                    },
-                    used: clip(lo, hi, r.start, r.used.min(r.end)),
-                    committed: clip(lo, hi, r.start, r.committed.min(r.end)),
-                    gc_storage: if r.gc_storage.is_some() {
-                        clip(lo, hi, r.object_start, r.committed.min(r.end))
-                    } else {
-                        0
-                    },
-                    ..Default::default()
-                };
-            }
-            for i in r.first_object..r.end_object {
-                let mut lo = self.heap.addresses[i];
-                let end = (lo + self.heap.size(i)).min(r.end);
-                while lo < end {
-                    let k = ((lo - base) / GRANULE) as usize;
-                    let hi = end.min(base + (k + 1) as u64 * GRANULE);
-                    if let Some(cell) = pages[p].get_mut(k) {
-                        let amount = (hi - lo) as u32;
-                        if self.graph.live[i] == 0 {
-                            cell.dead += amount;
-                        } else if self.graph.pending[i] != 0 {
-                            cell.pending += amount;
-                        } else {
-                            cell.live += amount;
+            .map(|page| {
+                let mut cells = Vec::new();
+                let mut region = self.heap.regions.partition_point(|r| r.end <= page.start);
+                let mut lo = page.start;
+                while lo < page.end {
+                    while region < self.heap.regions.len() && self.heap.regions[region].end <= lo {
+                        region += 1;
+                    }
+                    let boundary = page.end.min((lo | (GRANULE - 1)).saturating_add(1));
+                    let current = self.heap.regions.get(region).filter(|r| r.start <= lo);
+                    let hi = current.map_or_else(
+                        || {
+                            boundary
+                                .min(self.heap.regions.get(region).map_or(page.end, |r| r.start))
+                        },
+                        |r| boundary.min(r.end),
+                    );
+                    let mut cell = Granule {
+                        address: lo,
+                        size: (hi - lo) as u32,
+                        ..Granule::default()
+                    };
+                    if let Some(r) = current {
+                        cell.region = r.index as i32;
+                        cell.is_region_start = lo == r.start;
+                        cell.header = clip(lo, hi, r.start, r.object_start);
+                        cell.used = clip(lo, hi, r.start, r.used.min(r.end));
+                        cell.committed = clip(lo, hi, r.start, r.committed.min(r.end));
+                        if r.gc_storage.is_some() {
+                            cell.gc_storage = clip(lo, hi, r.object_start, r.committed.min(r.end));
+                        }
+                        let before = self.heap.addresses[r.first_object..r.end_object]
+                            .partition_point(|&a| a < lo);
+                        for i in r.first_object + before.saturating_sub(1)..r.end_object {
+                            let address = self.heap.addresses[i];
+                            if address >= hi {
+                                break;
+                            }
+                            let amount = clip(
+                                lo,
+                                hi,
+                                address,
+                                address.saturating_add(self.heap.size(i)).min(r.end),
+                            );
+                            if self.graph.live[i] == 0 {
+                                cell.dead += amount;
+                            } else if self.graph.pending[i] != 0 {
+                                cell.pending += amount;
+                            } else {
+                                cell.live += amount;
+                            }
                         }
                     }
+                    cells.push(cell);
                     lo = hi;
                 }
-            }
-        }
-        pages
+                cells
+            })
+            .collect()
     }
     pub fn region_strip(&self, region: usize, buckets: usize) -> RegionStrip {
         let r = &self.heap.regions[region];

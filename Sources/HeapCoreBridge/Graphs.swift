@@ -253,6 +253,7 @@ public struct OwnerTree: Sendable {
     }
 
     public func entry(_ node: Int) throws -> OwnerEntry { try bridge.entry(node: node)! }
+    public func hasChildren(_ node: Int) -> Bool { bridge.hasChildren(node: node) }
     public func children(of node: Int) -> RustArray<Int> { bridge.children(node: node) }
     public func groups(of node: Int) throws -> RustArray<OwnershipGroup> { try bridge.groups(node: node) }
     public var roots: RustArray<OwnerEntry> { get throws { try bridge.roots() } }

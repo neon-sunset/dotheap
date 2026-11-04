@@ -1,7 +1,7 @@
 use heap_core::{
     analysis::HeapSnapshot, cache::CacheChoice, graph::AnalysisOptions, static_ownership::OwnerKind,
 };
-use std::{path::Path, process::Command};
+use std::{path::Path, process::Command, sync::Arc};
 
 #[test]
 fn static_owners_count_shared_values_once_without_changing_physical_retention() {
@@ -44,6 +44,33 @@ fn static_owners_count_shared_values_once_without_changing_physical_retention() 
                 assert!(seen.insert(id), "an allocation must appear only once");
                 let e = tree.entry(&s, id).unwrap().unwrap();
                 let children = tree.children(&s, id);
+                assert_eq!(tree.has_children(&s, id), !children.is_empty());
+                assert!(Arc::ptr_eq(&children, &tree.children(&s, id)));
+                let groups = tree.groups(&s, id).unwrap();
+                assert!(Arc::ptr_eq(&groups, &tree.groups(&s, id).unwrap()));
+                for group in groups.iter() {
+                    let entries: Vec<_> = group
+                        .nodes
+                        .iter()
+                        .map(|&n| tree.entry(&s, n).unwrap().unwrap())
+                        .collect();
+                    assert_eq!(group.size, entries.iter().map(|e| e.size).sum::<u64>());
+                    assert_eq!(
+                        group.managed,
+                        entries.iter().map(|e| e.managed).sum::<u64>()
+                    );
+                    assert_eq!(group.native, entries.iter().map(|e| e.native).sum::<u64>());
+                    assert!(entries.windows(2).all(|w| w[0].total() > w[1].total()
+                        || (w[0].total() == w[1].total() && w[0].id < w[1].id)));
+                }
+                let mut grouped: Vec<_> = groups
+                    .iter()
+                    .flat_map(|g| g.nodes.iter().copied())
+                    .collect();
+                let mut ungrouped = children.as_ref().clone();
+                grouped.sort_unstable();
+                ungrouped.sort_unstable();
+                assert_eq!(grouped, ungrouped);
                 let bytes: u64 = children
                     .iter()
                     .map(|&n| tree.entry(&s, n).unwrap().unwrap().total())
@@ -57,7 +84,7 @@ fn static_owners_count_shared_values_once_without_changing_physical_retention() 
                     }
                     _ => {}
                 }
-                pending.extend(children);
+                pending.extend(children.iter().copied());
             }
             assert_eq!(
                 types,
@@ -97,6 +124,34 @@ fn static_owners_count_shared_values_once_without_changing_physical_retention() 
         assert_eq!(physical.retained(physical.object_node(0)), physical_storage);
         assert_eq!(&*s.type_retained().unwrap(), &*retained);
     }
+    for fixture in [
+        "reference-rooted",
+        "coreclr-62-workstation-regions",
+        "native-allocations",
+    ] {
+        let s = HeapSnapshot::open(
+            &dir.path().join(format!("{fixture}.dmp")),
+            vec![],
+            None,
+            AnalysisOptions::default(),
+            CacheChoice::None,
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(s.static_field_slots().unwrap().is_empty());
+        let physical = s.ownership().unwrap();
+        let tree = s.owner_tree(false).unwrap();
+        for id in 0..physical.count {
+            let entry = tree.entry(&s, id).unwrap().unwrap();
+            assert_eq!(entry.managed, physical.retained_managed[id]);
+            assert_eq!(entry.native, physical.retained_native[id]);
+            assert_eq!(tree.children(&s, id).as_ref(), &physical.children(id));
+            assert_eq!(
+                tree.has_children(&s, id),
+                !physical.children_rows.row(id).is_empty()
+            );
+        }
+    }
 }
 
 #[test]
@@ -129,7 +184,7 @@ fn a_value_that_fields_of_two_types_reach_belongs_to_static_fields() {
         let mut pending = vec![tree.root];
         let mut owner = None;
         while let Some(id) = pending.pop() {
-            for child in tree.children(&s, id) {
+            for &child in tree.children(&s, id).iter() {
                 if tree.entry(&s, child).unwrap().unwrap().object == Some(value) {
                     owner = Some(tree.entry(&s, id).unwrap().unwrap().kind);
                 }
@@ -141,5 +196,61 @@ fn a_value_that_fields_of_two_types_reach_belongs_to_static_fields() {
             Some(OwnerKind::StaticFields),
             "managed only: {managed_only}"
         );
+    }
+}
+
+#[test]
+fn shared_values_reached_through_long_chains_preserve_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../scripts/generate-compatibility-fixtures.py")
+            )
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let s = HeapSnapshot::open(
+        &dir.path().join("static-shared-chains.dmp"),
+        vec![],
+        None,
+        AnalysisOptions::default(),
+        CacheChoice::None,
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(s.graph.live_count, 516);
+    let shared = s.heap.count() - 1;
+    for managed_only in [false, true] {
+        let tree = s.owner_tree(managed_only).unwrap();
+        let mut pending = vec![tree.root];
+        let mut seen = std::collections::HashSet::new();
+        let mut objects = 0;
+        let mut shared_owner = None;
+        while let Some(id) = pending.pop() {
+            assert!(seen.insert(id));
+            let entry = tree.entry(&s, id).unwrap().unwrap();
+            objects += usize::from(entry.object.is_some());
+            let children = tree.children(&s, id);
+            let mut bytes = entry.size;
+            for &child in children.iter() {
+                let child_entry = tree.entry(&s, child).unwrap().unwrap();
+                bytes += child_entry.total();
+                if child_entry.object == Some(shared) {
+                    shared_owner = Some(entry.kind);
+                }
+            }
+            assert_eq!(entry.total(), bytes, "{}", entry.name);
+            if entry.kind == OwnerKind::Field {
+                assert_eq!(entry.total(), 0);
+            }
+            pending.extend(children.iter().copied());
+        }
+        assert_eq!(objects, 516);
+        assert_eq!(shared_owner, Some(OwnerKind::Type));
+        assert_eq!(tree.entry(&s, tree.root).unwrap().unwrap().total(), 16_536);
     }
 }

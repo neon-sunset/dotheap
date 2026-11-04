@@ -23,6 +23,7 @@ enum TypeNameStyle: String, CaseIterable, Identifiable {
     }
 
     func display(_ name: String, width: CGFloat, font: NSFont, singleLine: Bool = false) -> String {
+        if self == .standard || (self == .expanded && singleLine) { return name }
         func fits(_ value: Substring) -> Bool {
             (String(value) as NSString).size(withAttributes: [.font: font]).width <= width
         }
@@ -72,8 +73,9 @@ extension EnvironmentValues {
 }
 
 struct TypeNameText: NSViewRepresentable {
+    @Environment(\.typeNameStyle) private var typeNameStyle
     let name: String
-    let style: TypeNameStyle
+    var style: TypeNameStyle?
     var color: NSColor = .labelColor
     var singleLine = false
 
@@ -86,14 +88,18 @@ struct TypeNameText: NSViewRepresentable {
     }
 
     func updateNSView(_ field: TypeNameField, context: Context) {
+        let style = style ?? typeNameStyle
+        let changed = field.name != name || field.style != style || field.singleLine != singleLine
         field.name = name
         field.style = style
         field.singleLine = singleLine
         field.textColor = color
         field.toolTip = name
         field.setAccessibilityValue(name)
-        field.needsLayout = true
-        field.invalidateIntrinsicContentSize()
+        if changed {
+            field.needsLayout = true
+            field.invalidateIntrinsicContentSize()
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TypeNameField, context: Context) -> CGSize? {
@@ -102,17 +108,26 @@ struct TypeNameText: NSViewRepresentable {
 }
 
 final class TypeNameField: NSTextField {
-    var name = ""
+    var name = "" { didSet { if name != oldValue { measuredSize = nil } } }
     var style = TypeNameStyle.standard
     var singleLine = false
 
     private var textFont: NSFont { font ?? .systemFont(ofSize: NSFont.systemFontSize) }
+    private var measuredSize: (font: NSFont, size: CGSize)?
+
+    private var naturalSize: CGSize {
+        let font = textFont
+        if let measuredSize, measuredSize.font == font { return measuredSize.size }
+        let size = (name as NSString).size(withAttributes: [.font: font])
+        measuredSize = (font, size)
+        return size
+    }
 
     func size(for width: CGFloat?) -> CGSize {
-        let natural = (name as NSString).size(withAttributes: [.font: textFont])
+        let natural = naturalSize
         let width = max(0, min(floor(width ?? .infinity), ceil(natural.width)))
-        let text = style.display(name, width: width, font: textFont, singleLine: singleLine)
-        let lines: CGFloat = text.contains("\n") ? 2 : 1
+        let lines: CGFloat = style == .expanded && !singleLine
+            && style.display(name, width: width, font: textFont).contains("\n") ? 2 : 1
         return CGSize(width: width, height: ceil(natural.height) * lines)
     }
 

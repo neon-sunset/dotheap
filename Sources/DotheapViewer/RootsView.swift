@@ -20,7 +20,7 @@ struct RootsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                         TextTable(rows: roots, id: { $0.id }, columns: [
                             .init("Source", width: 340, minWidth: 110, flexible: true, truncation: .byTruncatingMiddle, value: \.name, text: { $0.name + ($0.threadStatic ? " (thread statics)" : "") },
-                                  help: { $0.name }),
+                                  help: { $0.name }, isTypeName: { $0.kind == .type }),
                             .init("Managed bytes", width: 105, minWidth: 65, font: .digits, value: \.managed, text: { Format.bytes($0.managed) }),
                             .init("Native bytes", width: 95, minWidth: 65, font: .digits, value: \.native, text: { Format.bytes($0.native) }),
                         ], sort: $order, selection: selected, select: { selected = $0 })
@@ -54,7 +54,7 @@ struct RootsView: View {
             TextTable(rows: snapshot.handleGroups(), columns: [
                 .init("Handle type", width: 110, value: \.handleType, text: \.handleType),
                 .init("Target type", width: 260, flexible: true, truncation: .byTruncatingMiddle, value: \.targetType,
-                      text: { TypeNames.short($0.targetType) }, help: { $0.targetType }),
+                      text: { TypeNames.short($0.targetType) }, help: { $0.targetType }, isTypeName: { _ in true }),
                 .init("Handles", width: 70, font: .digits, value: \.count, text: { $0.count.formatted() }),
                 .init("Live targets", width: 80, font: .digits, value: \.liveTargets, text: { $0.liveTargets.formatted() }),
                 .init("Target bytes", width: 90, font: .digits, value: \.targetBytes, text: { Format.bytes($0.targetBytes) }),
@@ -122,7 +122,8 @@ struct RootReferences: View {
                 }?.id
                 TextTable(rows: rows, columns: [
                     .init("Reference", width: 340, minWidth: compact ? 80 : 140, flexible: true, truncation: .byTruncatingMiddle,
-                          value: \.name, text: { TypeNames.short($0.name) }, help: { $0.name + "\n" + $0.kind + " · " + Format.hex($0.address) }),
+                          value: \.name, text: { TypeNames.short($0.name) }, help: { $0.name + "\n" + $0.kind + " · " + Format.hex($0.address) },
+                          isTypeName: { if case .object = $0.node { true } else { false } }),
                 ] + (wide || order?.column == "Kind" ? [
                     .init("Kind", width: 65, minWidth: 55, value: \.kind, text: \.kind),
                 ] : []) + (wide || order?.column == "Address" ? [

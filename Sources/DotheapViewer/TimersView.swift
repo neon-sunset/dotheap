@@ -7,7 +7,7 @@ struct TimersView: View {
     @Environment(Session.self) private var session
     let snapshot: HeapSnapshot
     @State private var text = ""
-    @State private var order = [KeyPathComparator(\TimerGroup.count, order: .reverse)]
+    @State private var order: TableSort? = TableSort(column: "Timers", ascending: false)
 
     struct Model {
         let timers: HeapSnapshot.Timers
@@ -48,7 +48,6 @@ struct TimersView: View {
             .map { TimerGroup(id: $0.key, timers: $0.value) }
             .filter { text.isEmpty || $0.id.localizedCaseInsensitiveContains(text) }
             .sorted { ($0.count, $1.id) > ($1.count, $0.id) }
-            .sorted(using: order)
         let group = groups.first { $0.id == session.timerGroup }
         let awaited = all.filter { $0.awaitedBy != nil }.count
         return VStack(alignment: .leading, spacing: 10) {
@@ -64,13 +63,15 @@ struct TimersView: View {
             }
             TextField("Filter by method, type or field", text: $text).textFieldStyle(.roundedBorder).frame(maxWidth: 320)
             SplitPanes(axis: .horizontal, firstMin: 420, secondMin: 360, initial: 0.55) {
-                Table(groups, selection: Binding(get: { session.timerGroup }, set: { session.timerGroup = $0; session.timer = nil }), sortOrder: $order) {
-                    TableColumn("Timers", value: \TimerGroup.count) { g in Text(g.count.formatted()).monospacedDigit() }.width(min: 40, ideal: 50)
-                    TableColumn("Kind", value: \TimerGroup.kind) { g in Text(g.kind) }.width(min: 70, ideal: 100)
-                    TableColumn("Calls or awaited by", value: \TimerGroup.does) { g in Text(g.does).lineLimit(2).help(g.does) }.width(min: 140, ideal: 300)
-                    TableColumn("Held by", value: \TimerGroup.heldBy) { g in Text(g.heldBy).lineLimit(2).help(g.heldBy) }.width(min: 100, ideal: 200)
-                    TableColumn("Period", value: \TimerGroup.periodValue) { g in Text(g.period) }.width(min: 50, ideal: 80)
-                }
+                TextTable(rows: groups, columns: [
+                    .init("Timers", width: 50, minWidth: 40, font: .digits, value: \.count, text: { $0.count.formatted() }),
+                    .init("Kind", width: 100, minWidth: 70, value: \.kind, text: \.kind),
+                    .init("Calls or awaited by", width: 300, minWidth: 140, flexible: true, truncation: .byTruncatingMiddle,
+                          value: \.does, text: \.does, help: { $0.does }),
+                    .init("Held by", width: 200, minWidth: 100, truncation: .byTruncatingMiddle, value: \.heldBy, text: \.heldBy,
+                          help: { $0.heldBy }, isTypeName: { _ in true }),
+                    .init("Period", width: 80, minWidth: 50, value: \.periodValue, text: \.period),
+                ], sort: $order, selection: session.timerGroup, select: { session.timerGroup = $0; session.timer = nil })
             } second: {
                 if let group {
                     TimerGroupPane(snapshot: snapshot, group: group, places: model.places).id(group.id)

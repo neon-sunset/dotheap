@@ -35,6 +35,8 @@ struct FindingsView: View {
             } second: {
                 detail(reports)
             }
+        } else if let error = session.findingsError {
+            Text(error).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let report = session.integrityReport {
             ReportView(snapshot: snapshot, report: report)
         } else {
@@ -182,7 +184,7 @@ private struct SectionTable: View {
                     Divider()
                     ForEach(Array(rows.prefix(200).enumerated()), id: \.offset) { _, row in
                         GridRow {
-                            ForEach(Array(row.cells.enumerated()), id: \.offset) { _, cell in CellView(cell: cell) }
+                            ForEach(Array(row.cells.enumerated()), id: \.offset) { k, cell in CellView(cell: cell, column: section.columns[k]) }
                             Examples(snapshot: snapshot, samples: row.samples)
                         }
                     }
@@ -196,11 +198,14 @@ private struct SectionTable: View {
 
 private struct CellView: View {
     let cell: CheckReport.Cell
+    let column: String
     var none = "-"
 
     var body: some View {
         switch cell {
-        case let .text(t): Text(t).lineLimit(2).textSelection(.enabled).help(t)
+        case let .text(t):
+            if ["type", "array", "subscriber types"].contains(column) { TypeNameText(name: t, singleLine: true) }
+            else { Text(t).lineLimit(2).textSelection(.enabled).help(t) }
         case let .int(i): Text(i.formatted()).monospacedDigit().gridColumnAlignment(.trailing)
         case let .bytes(b): Text(Format.bytes(b)).monospacedDigit().gridColumnAlignment(.trailing)
         case let .address(a): Text(Format.hex(a)).font(.callout.monospaced()).textSelection(.enabled)
@@ -302,7 +307,7 @@ private struct SectionTree: View {
                                     Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                                         .rotationEffect(.degrees(collapsed.contains(line.path) ? 0 : 90)).frame(width: 14)
                                         .opacity(line.row.children.isEmpty ? 0 : 1)
-                                    CellView(cell: cell, none: "")
+                                    CellView(cell: cell, column: section.columns[k], none: "")
                                 }
                                 .contentShape(Rectangle())
                                 .onTapGesture {
@@ -310,7 +315,7 @@ private struct SectionTree: View {
                                     if collapsed.contains(line.path) { collapsed.remove(line.path) } else { collapsed.insert(line.path) }
                                 }
                             } else {
-                                CellView(cell: cell, none: "")
+                                CellView(cell: cell, column: section.columns[k], none: "")
                             }
                         }
                         Examples(snapshot: snapshot, samples: line.row.samples, showType: false)

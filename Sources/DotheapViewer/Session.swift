@@ -67,6 +67,14 @@ enum Section: String, CaseIterable, Identifiable {
 enum HeapView: String, CaseIterable, Identifiable {
     case statistics = "Statistics", map = "Region Map", list = "Region List"
     var id: String { rawValue }
+    func title(_ kind: HeapKind) -> String {
+        guard kind.usesSegments else { return rawValue }
+        switch self {
+        case .statistics: return rawValue
+        case .map: return "Segment Map"
+        case .list: return "Segment Ranges"
+        }
+    }
 }
 
 @MainActor @Observable
@@ -123,6 +131,7 @@ final class Session {
     var reports: RustArray<CheckReport>?
     var integrityReport: CheckReport?
     var summaryFindings: RustArray<HeapSnapshot.SummaryFinding>?
+    var findingsError: String?
     var selectedType: UInt32?
     /// The group of task graphs, the graph and the node (its path from the graph's roots) open on the Tasks page.
     var taskGroup: Int?
@@ -234,7 +243,7 @@ final class Session {
         openTask?.cancel(); captureMode = nil
         dumpPath = dump; smapsPath = smaps; dllFolder = dlls
         snapshot = nil; error = nil; loading = true; phase = "Opening the dump"; fraction = 0
-        reports = nil; integrityReport = nil; summaryFindings = nil
+        reports = nil; integrityReport = nil; summaryFindings = nil; findingsError = nil
         selectedRegion = nil; selectedType = nil; selectedObject = nil; summaryPath = []; backStack = []; forwardStack = []; recorded = nil
         taskGroup = nil; taskGraph = nil; taskNode = nil; threadStack = nil; timerGroup = nil; timer = nil; networkGroup = nil
         selectedChunkGroup = nil; inspectedObject = nil; showInspector = false
@@ -499,6 +508,7 @@ final class Session {
             snapshot = reopened
             reports = nil
             summaryFindings = nil
+            findingsError = nil
             return reopened
         } catch {
             if snapshot === s { self.error = analysisErrorMessage(error) }
@@ -510,13 +520,15 @@ final class Session {
         guard snapshot === s else { return }
         do {
             let integrity = try await Task.detached(priority: .userInitiated) { try s.verificationCheck() }.value
-            if snapshot === s { integrityReport = integrity }
+            guard snapshot === s else { return }
+            integrityReport = integrity
             let reports = try await Task.detached(priority: .userInitiated) { try s.memo("all checks") { try s.allChecks() } }.value
-            if snapshot === s { self.reports = reports }
+            guard snapshot === s else { return }
+            self.reports = reports
             let findings = try await Task.detached(priority: .userInitiated) { try s.summaryFindings() }.value
             if snapshot === s { summaryFindings = findings }
         } catch {
-            if snapshot === s { self.error = analysisErrorMessage(error) }
+            if snapshot === s { self.findingsError = analysisErrorMessage(error) }
         }
     }
 

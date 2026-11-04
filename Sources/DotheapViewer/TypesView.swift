@@ -17,7 +17,6 @@ struct TypeRow: Identifiable, Sendable {
 
 struct TypesView: View {
     @Environment(Session.self) private var session
-    @Environment(\.typeNameStyle) private var typeNameStyle
     let snapshot: HeapSnapshot
     @State private var sort: TableSort? = TableSort(column: "Retained", ascending: false)
     @State private var filter = ""
@@ -45,7 +44,7 @@ struct TypesView: View {
                     }
                     TextTable(rows: rows, columns: [
                         .init("Type", width: 380, minWidth: 220, flexible: true, truncation: .byTruncatingMiddle, value: \.shortName,
-                              text: \.name, help: \.name, typeNameStyle: typeNameStyle),
+                              text: \.name, help: \.name, isTypeName: { _ in true }),
                         .init("Objects", width: 80, font: .digits, value: \.count, text: { $0.count.formatted() }),
                         .init("Live", width: 70, font: .digits, value: \.liveCount, text: { $0.liveCount.formatted() }),
                         .init("Live bytes", width: 85, font: .digits, value: \.liveBytes, text: { Format.bytes($0.liveBytes) }),

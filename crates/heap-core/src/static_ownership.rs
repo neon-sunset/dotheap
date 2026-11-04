@@ -3,7 +3,7 @@ use crate::{
     analysis::HeapSnapshot,
     column::ColumnStore,
     gc_desc::GcDesc,
-    graph::{DominatorGraph, RootKind, dominators},
+    graph::{CompressedRows, DominatorGraph, RootKind, dominators},
     handles,
     native_graph::NativeGraph,
     ownership::{OwnershipGraph, OwnershipGroup, OwnershipNode},
@@ -12,7 +12,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +64,8 @@ pub struct OwnerTree {
     count: usize,
     entries: HashMap<usize, OwnerEntry>,
     children: HashMap<usize, Vec<usize>>,
+    sorted_children: Mutex<HashMap<usize, Arc<Vec<usize>>>>,
+    grouped_children: Mutex<HashMap<usize, Arc<Vec<OwnershipGroup>>>>,
     fields: HashMap<usize, Vec<StaticReference>>,
     pub roots: Vec<usize>,
 }
@@ -304,17 +306,39 @@ impl OwnerTree {
             Ok(None)
         }
     }
-    pub fn children(&self, s: &HeapSnapshot, node: usize) -> Vec<usize> {
-        let mut children = self.children.get(&node).cloned().unwrap_or_default();
-        if node < self.count {
-            children.extend(
-                self.base(s)
-                    .children(node)
+    fn unsorted_children<'a>(
+        &'a self,
+        s: &'a HeapSnapshot,
+        node: usize,
+    ) -> impl Iterator<Item = usize> + 'a {
+        let original = if node < self.count {
+            self.ownership.as_ref().map_or_else(
+                || s.graph.dominator_rows.row(node),
+                |g| g.children_rows.row(node),
+            )
+        } else {
+            &[]
+        };
+        self.children
+            .get(&node)
+            .into_iter()
+            .flatten()
+            .copied()
+            .chain(
+                original
                     .iter()
                     .map(|&n| n as usize)
                     .filter(|n| !self.entries.contains_key(n)),
-            );
+            )
+    }
+    pub fn has_children(&self, s: &HeapSnapshot, node: usize) -> bool {
+        self.unsorted_children(s, node).next().is_some()
+    }
+    pub fn children(&self, s: &HeapSnapshot, node: usize) -> Arc<Vec<usize>> {
+        if let Some(children) = self.sorted_children.lock().unwrap().get(&node) {
+            return Arc::clone(children);
         }
+        let mut children: Vec<_> = self.unsorted_children(s, node).collect();
         let base = self.base(s);
         let retained = |n| {
             self.entries.get(&n).map_or_else(
@@ -325,43 +349,138 @@ impl OwnerTree {
                 OwnerEntry::total,
             )
         };
-        children.sort_by(|&a, &b| retained(b).cmp(&retained(a)).then(a.cmp(&b)));
-        children
+        children.sort_by_cached_key(|&id| (std::cmp::Reverse(retained(id)), id));
+        children.shrink_to_fit();
+        let children = Arc::new(children);
+        self.sorted_children
+            .lock()
+            .unwrap()
+            .entry(node)
+            .or_insert(children)
+            .clone()
     }
-    pub fn groups(&self, s: &HeapSnapshot, node: usize) -> Result<Vec<OwnershipGroup>> {
-        let mut groups = BTreeMap::<_, OwnershipGroup>::new();
-        for id in self.children(s, node) {
-            let e = self.entry(s, id)?.unwrap();
-            let (kind, library) = if let Some(c) = e.chunk {
-                let a = s.native_graph()?.attribution(c, s)?;
-                (Some(a.kind.group_kind()), a.library)
-            } else {
-                (None, None)
-            };
-            let identity = if e.object.is_some() || e.chunk.is_some() {
-                0
-            } else {
-                id + 1
-            };
-            let g = groups
-                .entry((identity, e.name.clone(), kind, library.clone()))
-                .or_insert_with(|| OwnershipGroup {
-                    name: e.name,
-                    kind,
-                    library,
-                    nodes: vec![],
-                    size: 0,
-                    managed: 0,
-                    native: 0,
-                });
-            g.nodes.push(id);
-            g.size += e.size;
-            g.managed += e.managed;
-            g.native += e.native;
+    pub fn groups(&self, s: &HeapSnapshot, node: usize) -> Result<Arc<Vec<OwnershipGroup>>> {
+        if let Some(groups) = self.grouped_children.lock().unwrap().get(&node) {
+            return Ok(Arc::clone(groups));
         }
-        let mut groups: Vec<_> = groups.into_values().collect();
-        groups.sort_by(|a, b| b.total().cmp(&a.total()).then(a.name.cmp(&b.name)));
-        Ok(groups)
+        let base = self.base(s);
+        let mut indices = BTreeMap::new();
+        let mut types = HashMap::<u32, usize>::new();
+        let mut groups = Vec::<(usize, OwnershipGroup)>::new();
+        for id in self.unsorted_children(s, node) {
+            let entry = self.entries.get(&id);
+            let object = match entry {
+                Some(e) if e.kind == OwnerKind::Object => e.object,
+                Some(_) => None,
+                None => match base.node(id) {
+                    OwnershipNode::Object(i) => Some(i),
+                    _ => None,
+                },
+            };
+            let type_id = object.map(|i| s.heap.type_ids[i]);
+            if let Some(object) = object
+                && let Some(index) = types.get(&s.heap.type_ids[object])
+            {
+                let g = &mut groups[*index].1;
+                let (managed, native) =
+                    entry.map_or_else(|| base.retained(id), |e| (e.managed, e.native));
+                g.nodes.push(id);
+                g.size += s.heap.size(object);
+                g.managed += managed;
+                g.native += native;
+                continue;
+            }
+            let (name, kind, library, identity, size, managed, native) = if entry.is_none()
+                && let OwnershipNode::Chunk(c) = base.node(id)
+            {
+                let graph = s.native_graph()?;
+                let a = graph.attribution(c, s)?;
+                let (managed, native) = base.retained(id);
+                (
+                    a.label,
+                    Some(a.kind.group_kind()),
+                    a.library,
+                    0,
+                    graph.chunks[c].size,
+                    managed,
+                    native,
+                )
+            } else {
+                let e = self.entry(s, id)?.unwrap();
+                let (kind, library) = if let Some(c) = e.chunk {
+                    let a = s.native_graph()?.attribution(c, s)?;
+                    (Some(a.kind.group_kind()), a.library)
+                } else {
+                    (None, None)
+                };
+                let identity = if e.object.is_some() || e.chunk.is_some() {
+                    0
+                } else {
+                    id + 1
+                };
+                (e.name, kind, library, identity, e.size, e.managed, e.native)
+            };
+            let index = *indices
+                .entry((identity, name.clone(), kind, library.clone()))
+                .or_insert_with(|| {
+                    let index = groups.len();
+                    groups.push((
+                        identity,
+                        OwnershipGroup {
+                            name,
+                            kind,
+                            library,
+                            nodes: vec![],
+                            size: 0,
+                            managed: 0,
+                            native: 0,
+                        },
+                    ));
+                    index
+                });
+            if let Some(type_id) = type_id {
+                types.insert(type_id, index);
+            }
+            let g = &mut groups[index].1;
+            g.nodes.push(id);
+            g.size += size;
+            g.managed += managed;
+            g.native += native;
+        }
+        for (_, g) in &mut groups {
+            if g.nodes.iter().any(|id| self.entries.contains_key(id)) {
+                g.nodes.sort_by_cached_key(|&id| {
+                    let (managed, native) = self
+                        .entries
+                        .get(&id)
+                        .map_or_else(|| base.retained(id), |e| (e.managed, e.native));
+                    (std::cmp::Reverse(managed + native), id)
+                });
+            } else {
+                g.nodes.sort_unstable_by_key(|&id| {
+                    let (managed, native) = base.retained(id);
+                    (std::cmp::Reverse(managed + native), id)
+                });
+            }
+            g.nodes.shrink_to_fit();
+        }
+        groups.sort_by(|(ai, a), (bi, b)| {
+            b.total()
+                .cmp(&a.total())
+                .then(a.name.cmp(&b.name))
+                .then(ai.cmp(bi))
+                .then(a.kind.cmp(&b.kind))
+                .then(a.library.cmp(&b.library))
+        });
+        let groups: Vec<_> = groups.into_iter().map(|(_, g)| g).collect();
+        let groups = Arc::new(groups);
+        Ok(self
+            .grouped_children
+            .lock()
+            .unwrap()
+            .entry(node)
+            .or_insert(groups)
+            .clone())
     }
     pub fn storage_fields(&self, object: usize) -> &[StaticReference] {
         self.fields
@@ -458,6 +577,34 @@ impl OwnerTree {
             }
         }
         thread_sources.retain(|&node| base.parent(node).is_some());
+        let mut roots = if let Some(g) = base.ownership {
+            g.roots()
+                .into_iter()
+                .map(|r| r.node)
+                .filter(|r| !thread_sources.contains(r))
+                .collect::<Vec<_>>()
+        } else {
+            (0..s.graph.sources.len())
+                .map(|k| s.heap.count() + k)
+                .filter(|r| !thread_sources.contains(r))
+                .collect()
+        };
+        if bindings.is_empty() && thread_sources.is_empty() {
+            let root = base.root();
+            let count = base.count();
+            s.dump.check()?;
+            return Ok(Self {
+                ownership,
+                root,
+                count,
+                roots,
+                entries: HashMap::new(),
+                children: HashMap::new(),
+                fields: HashMap::new(),
+                sorted_children: Mutex::default(),
+                grouped_children: Mutex::default(),
+            });
+        }
         let mut marked = BTreeSet::from([base.root()]);
         for node in bindings
             .iter()
@@ -472,22 +619,25 @@ impl OwnerTree {
                 n = p;
             }
         }
-        let frontier: BTreeSet<_> = marked
+        let mut frontier: Vec<_> = marked
             .iter()
             .flat_map(|&n| base.children(n))
             .map(|&c| c as usize)
             .filter(|c| !marked.contains(c))
             .collect();
+        frontier.sort_unstable();
         let mut originals = vec![base.root()];
         originals.extend(marked.iter().copied().filter(|&n| n != base.root()));
         originals.extend(frontier);
-        let mut index: HashMap<_, _> = originals.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let mut index = vec![0u32; base.count()];
+        for (i, &node) in originals.iter().enumerate() {
+            index[node] = i as u32 + 1;
+        }
         let mut graph = SmallGraph::default();
         let mut entries = Vec::new();
         let mut weights = Vec::new();
         for &node in &originals {
             graph.add();
-            entries.push(base.entry(node)?);
             weights.push(base.retained(node));
         }
         for &node in originals.iter().skip(1) {
@@ -495,8 +645,8 @@ impl OwnerTree {
                 .parent(node)
                 .expect("marked ancestors include the root");
             let w = base.retained(node);
-            weights[index[&p]].0 -= w.0;
-            weights[index[&p]].1 -= w.1;
+            weights[index[p] as usize - 1].0 -= w.0;
+            weights[index[p] as usize - 1].1 -= w.1;
         }
         let mut removed: HashSet<_> = bindings
             .iter()
@@ -520,17 +670,18 @@ impl OwnerTree {
             s,
             ownership: ownership.as_deref(),
         })?;
-        let mut nearest = HashMap::new();
+        let mut path = Vec::new();
+        let mut seen = vec![0u32; originals.len()];
         for (i, &node) in originals.iter().enumerate().skip(1) {
             predecessors.each(node, &mut |p| {
                 if removed.contains(&(p, node)) || thread_sources.contains(&node) {
                     return;
                 }
                 let mut at = p;
-                let mut path = Vec::new();
+                path.clear();
                 let found = loop {
-                    if let Some(&i) = index.get(&at).or_else(|| nearest.get(&at)) {
-                        break Some(i);
+                    if index[at] != 0 {
+                        break Some(index[at] as usize - 1);
                     }
                     path.push(at);
                     let Some(parent) = base.parent(at) else {
@@ -539,13 +690,19 @@ impl OwnerTree {
                     at = parent;
                 };
                 if let Some(parent) = found {
-                    for n in path {
-                        nearest.insert(n, parent);
+                    for &n in &path {
+                        index[n] = parent as u32 + 1;
                     }
-                    graph.edge(parent, i);
+                    if seen[parent] != i as u32 {
+                        seen[parent] = i as u32;
+                        graph.edge(parent, i);
+                    }
                 }
             });
         }
+        drop(seen);
+        drop(path);
+        drop(predecessors);
         let mut next_id = base.count();
         let mut add = |graph: &mut SmallGraph,
                        entries: &mut Vec<OwnerEntry>,
@@ -579,7 +736,7 @@ impl OwnerTree {
             );
             graph.edge(0, group);
             for &source in &thread_sources {
-                graph.edge(group, index[&source]);
+                graph.edge(group, index[source] as usize - 1);
             }
         }
         let mut anchors = HashMap::new();
@@ -620,7 +777,7 @@ impl OwnerTree {
         let stacks = s.thread_stacks()?;
         for (slot, object, target, f) in bindings {
             let thread_static = f.thread.is_some();
-            let anchor = index[&anchors[&(f.method_table, thread_static)]];
+            let anchor = index[anchors[&(f.method_table, thread_static)]] as usize - 1;
             let category = *categories
                 .entry((anchor, thread_static))
                 .or_insert_with(|| {
@@ -682,23 +839,23 @@ impl OwnerTree {
             } else {
                 field
             };
-            entries[ty].thread_static = thread_static;
-            entries[field].thread_static = thread_static;
-            entries[owner].thread_static = thread_static;
-            if !entries[field].targets.contains(&target) {
-                entries[field].targets.push(target);
+            entries[ty - originals.len()].thread_static = thread_static;
+            entries[field - originals.len()].thread_static = thread_static;
+            entries[owner - originals.len()].thread_static = thread_static;
+            if !entries[field - originals.len()].targets.contains(&target) {
+                entries[field - originals.len()].targets.push(target);
             }
             if owner != field {
-                entries[owner].targets.push(target);
+                entries[owner - originals.len()].targets.push(target);
             }
-            graph.edge(owner, index[&base.object(target)]);
+            graph.edge(owner, index[base.object(target)] as usize - 1);
             references.entry(object).or_default().push(StaticReference {
                 slot,
                 declaring_type: f.declaring_type,
                 field: f.name,
                 thread: f.thread,
                 target,
-                owner: entries[owner].id,
+                owner: entries[owner - originals.len()].id,
             });
         }
         if only_storage.is_none() {
@@ -729,36 +886,23 @@ impl OwnerTree {
                 references.entry(object).or_default().extend(fields);
             }
         }
-        let (idom, managed, _) = dominators(&graph, &ColumnStore::default(), |n| weights[n].0)?;
-        let native = retained_weights(&idom, &weights.iter().map(|w| w.1).collect::<Vec<_>>());
-        let mut children = HashMap::<_, Vec<_>>::new();
-        for i in 0..entries.len() {
-            entries[i].managed = managed[i];
-            entries[i].native = native[i];
-            if idom[i] >= 0 {
-                children
-                    .entry(entries[idom[i] as usize].id)
-                    .or_default()
-                    .push(entries[i].id);
+        drop(index);
+        let (idom, managed, children_rows) =
+            dominators(&graph, &ColumnStore::default(), |n| weights[n].0)?;
+        drop(graph);
+        let native = retained_weights(&idom, &children_rows, &weights);
+        let id = |i: usize| {
+            if i < originals.len() {
+                originals[i]
+            } else {
+                base.count() + i - originals.len()
             }
-        }
-        let mut roots = if let Some(g) = base.ownership {
-            g.roots()
-                .into_iter()
-                .map(|r| r.node)
-                .filter(|r| !thread_sources.contains(r))
-                .collect::<Vec<_>>()
-        } else {
-            (0..s.graph.sources.len())
-                .map(|k| s.heap.count() + k)
-                .filter(|r| !thread_sources.contains(r))
-                .collect()
         };
         roots.extend(
             types
                 .iter()
                 .filter(|(key, _)| anchors[*key] == base.root())
-                .map(|(_, &i)| entries[i].id),
+                .map(|(_, &i)| id(i)),
         );
         roots.extend(
             entries
@@ -766,7 +910,30 @@ impl OwnerTree {
                 .filter(|e| e.kind == OwnerKind::Storage)
                 .map(|e| e.id),
         );
-        index.clear();
+        let mut children = HashMap::<_, Vec<_>>::new();
+        let mut changed = HashMap::new();
+        let mut entries = entries.into_iter();
+        for i in 0..idom.len() {
+            let node = id(i);
+            let parent = (idom[i] >= 0).then(|| id(idom[i] as usize));
+            if i < originals.len()
+                && parent == base.parent(node)
+                && (managed[i], native[i]) == base.retained(node)
+            {
+                continue;
+            }
+            let mut entry = if i < originals.len() {
+                base.entry(node)?
+            } else {
+                entries.next().unwrap()
+            };
+            entry.managed = managed[i];
+            entry.native = native[i];
+            if let Some(parent) = parent {
+                children.entry(parent).or_default().push(node);
+            }
+            changed.insert(node, entry);
+        }
         let root = base.root();
         let count = base.count();
         s.dump.check()?;
@@ -774,28 +941,24 @@ impl OwnerTree {
             ownership,
             root,
             count,
-            entries: entries.into_iter().map(|e| (e.id, e)).collect(),
+            entries: changed,
             children,
+            sorted_children: Mutex::default(),
+            grouped_children: Mutex::default(),
             fields: references,
             roots,
         })
     }
 }
 
-fn retained_weights(idom: &[i32], weights: &[u64]) -> Vec<u64> {
-    let mut children = vec![Vec::new(); idom.len()];
-    for (n, &p) in idom.iter().enumerate() {
-        if p >= 0 {
-            children[p as usize].push(n);
-        }
-    }
+fn retained_weights(idom: &[i32], children: &CompressedRows, weights: &[(u64, u64)]) -> Vec<u64> {
     let mut order = vec![0];
     let mut k = 0;
     while k < order.len() {
-        order.extend_from_slice(&children[order[k]]);
+        order.extend(children.row(order[k]).iter().map(|&n| n as usize));
         k += 1;
     }
-    let mut retained = weights.to_vec();
+    let mut retained: Vec<_> = weights.iter().map(|w| w.1).collect();
     for &n in order.iter().rev() {
         if idom[n] >= 0 {
             retained[idom[n] as usize] += retained[n];

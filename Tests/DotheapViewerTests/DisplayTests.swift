@@ -58,6 +58,19 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(clicks, 1)
     }
 
+    @MainActor func testTypeNameMeasurementUpdatesForNameAndFont() {
+        let field = TypeNameField(labelWithString: "")
+        field.font = .systemFont(ofSize: 12)
+        field.name = "Task"
+        let first = field.size(for: nil)
+        field.name = "System.Threading.Tasks.Task"
+        let longer = field.size(for: nil)
+        XCTAssertGreaterThan(longer.width, first.width)
+        field.font = .systemFont(ofSize: 20)
+        XCTAssertGreaterThan(field.size(for: nil).width, longer.width)
+        XCTAssertGreaterThan(field.size(for: nil).height, longer.height)
+    }
+
     @MainActor func testTypeNameExpandsWhenTheFieldGetsWider() {
         let field = TypeNameField(labelWithString: "")
         field.font = .systemFont(ofSize: NSFont.systemFontSize)
@@ -69,6 +82,67 @@ final class DisplayTests: XCTestCase {
         field.frame.size.width = 400
         field.layoutSubtreeIfNeeded()
         XCTAssertEqual(field.stringValue, field.name)
+    }
+
+    @MainActor func testTableTypeNamesFollowSettingsAndColumnWidth() async throws {
+        _ = NSApplication.shared
+        struct Row: Identifiable {
+            let id: Int
+            let name: String
+            let managed: Bool
+        }
+        let name = "System.Collections.Generic.Dictionary<System.String, Example.Cache.Entry>"
+        let path = "/usr/local/lib/Example.Native.Library.dylib"
+        let rows = [Row(id: 0, name: name, managed: true), Row(id: 1, name: path, managed: false)]
+        func content(_ style: TypeNameStyle) -> some View {
+            TextTable(rows: rows, columns: [
+                .init("Type or source", width: 190, flexible: true, value: \.name, text: \.name, isTypeName: \.managed),
+                .init("Path", width: 180, text: { _ in path }),
+            ], sort: .constant(nil), selection: 0, select: { _ in })
+                .environment(\.typeNameStyle, style)
+        }
+        let host = NSHostingView(rootView: content(.standard))
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: 0, width: 420, height: 200),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        func table(in view: NSView) -> NSTableView? {
+            (view as? NSTableView) ?? view.subviews.lazy.compactMap { table(in: $0) }.first
+        }
+        func settle() async throws {
+            for _ in 0..<4 {
+                host.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        try await settle()
+        let table = try XCTUnwrap(table(in: host))
+        func field(_ column: Int, _ row: Int) throws -> NSTextField {
+            try XCTUnwrap((table.view(atColumn: column, row: row, makeIfNecessary: true) as? NSTableCellView)?.textField)
+        }
+        XCTAssertEqual(try field(0, 0).stringValue, name)
+        host.rootView = content(.initials)
+        try await settle()
+        XCTAssertEqual(try field(0, 0).stringValue, "S.C.G.Dictionary<S.String, E.C.Entry>")
+        XCTAssertEqual(try field(0, 0).toolTip, name)
+        XCTAssertEqual(try field(0, 1).stringValue, path)
+        XCTAssertEqual(try field(1, 0).stringValue, path)
+        XCTAssertEqual(table.selectedRow, 0)
+
+        window.setContentSize(NSSize(width: 1100, height: 200))
+        try await settle()
+        XCTAssertEqual(try field(0, 0).stringValue, name)
+        window.setContentSize(NSSize(width: 420, height: 200))
+        try await settle()
+        XCTAssertEqual(try field(0, 0).stringValue, "S.C.G.Dictionary<S.String, E.C.Entry>")
+        for style in [TypeNameStyle.expanded, .standard] {
+            host.rootView = content(style)
+            try await settle()
+            XCTAssertEqual(try field(0, 0).stringValue, name)
+            XCTAssertEqual(table.selectedRow, 0)
+        }
     }
 
     @MainActor func testWrappedNamesHaveRoomForEveryLine() async throws {
@@ -115,5 +189,47 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(Format.retained(managed: 512, native: 4096, nativeOwner: true), "\(total) (\(part) managed)")
         XCTAssertEqual(Format.retained(managed: 4096, native: 0, nativeOwner: false), Format.bytes(4096))
         XCTAssertEqual(Format.retained(managed: 0, native: 4096, nativeOwner: true), Format.bytes(4096))
+    }
+
+    @MainActor func testGroupedTableSortsWithinGroupsAndPreservesSelection() async throws {
+        _ = NSApplication.shared
+        struct Row: Identifiable { let id: Int; let group: String; let value: Int }
+        let rows = [Row(id: 0, group: "B", value: 2), Row(id: 1, group: "B", value: 1),
+                    Row(id: 2, group: "A", value: 4), Row(id: 3, group: "A", value: 3)]
+        var selected: Int?
+        func content(_ rows: [Row], ascending: Bool) -> some View {
+            TextTable(rows: rows, columns: [.init("Value", width: 100, flexible: true, value: \.value, text: { String($0.value) })],
+                      sort: .constant(TableSort(column: "Value", ascending: ascending)), group: { $0.group }, selection: 0, select: { selected = $0 })
+        }
+        let host = NSHostingView(rootView: content(rows, ascending: true))
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: 0, width: 400, height: 300), styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        func findTable(_ view: NSView) -> NSTableView? {
+            (view as? NSTableView) ?? view.subviews.lazy.compactMap(findTable).first
+        }
+        func settle() async throws {
+            for _ in 0..<4 { host.layoutSubtreeIfNeeded(); try await Task.sleep(for: .milliseconds(10)) }
+        }
+        try await settle()
+        let table = try XCTUnwrap(findTable(host))
+        func labels() -> [String] {
+            (0..<table.numberOfRows).map { (table.view(atColumn: 0, row: $0, makeIfNecessary: true) as? NSTableCellView)?.textField?.stringValue ?? "" }
+        }
+        XCTAssertEqual(labels(), ["B", "1", "2", "A", "3", "4"])
+        XCTAssertEqual(table.selectedRow, 2)
+        XCTAssertEqual(table.delegate?.tableView?(table, shouldSelectRow: 0), false)
+        table.selectRowIndexes([4], byExtendingSelection: false)
+        XCTAssertEqual(selected, 3)
+        host.rootView = content(rows, ascending: false)
+        try await settle()
+        XCTAssertEqual(labels(), ["B", "2", "1", "A", "4", "3"])
+        XCTAssertEqual(table.selectedRow, 1)
+        host.rootView = content(Array(rows.prefix(2)), ascending: true)
+        try await settle()
+        XCTAssertEqual(labels(), ["B", "1", "2"])
+        XCTAssertEqual(table.selectedRow, 2)
     }
 }

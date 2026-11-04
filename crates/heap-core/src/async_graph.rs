@@ -80,6 +80,39 @@ pub(crate) struct AsyncGraph<'a> {
     pub waiters_of: BTreeMap<usize, BTreeSet<usize>>,
     pub waits: BTreeMap<(String, String, String), (usize, bool)>,
     remaining_nodes: usize,
+    semaphore_waiters: HashMap<usize, usize>,
+}
+
+fn index_wait_queues(
+    queues: impl IntoIterator<Item = (usize, Option<usize>, Option<usize>)>,
+    next: impl Fn(usize) -> Option<usize>,
+) -> HashMap<usize, usize> {
+    let mut owners = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    for (owner, head, tail) in queues {
+        let mut nodes = HashSet::new();
+        let mut current = head;
+        let mut last = None;
+        while let Some(node) = current {
+            if !nodes.insert(node) {
+                break;
+            }
+            last = Some(node);
+            current = next(node);
+        }
+        if current.is_some() || last != tail {
+            continue;
+        }
+        for node in nodes {
+            if owners.insert(node, owner).is_some_and(|old| old != owner) {
+                ambiguous.insert(node);
+            }
+        }
+    }
+    for node in ambiguous {
+        owners.remove(&node);
+    }
+    owners
 }
 
 const COMPLETED: u32 = 0x200000 | 0x400000 | 0x1000000;
@@ -199,7 +232,12 @@ impl AsyncGraph<'_> {
             }
         }
         let excluded: BTreeSet<_> = ancestors.iter().copied().collect();
-        let mut held = self.holder(object, &excluded, false)?;
+        let semaphore = self.semaphore_waiters.get(&object).copied();
+        let mut held = if let Some(semaphore) = semaphore {
+            Some((semaphore, String::new()))
+        } else {
+            self.holder(object, &excluded, false)?
+        };
         let mut resource = object;
         if name == "System.Net.Sockets.Socket+AwaitableSocketAsyncEventArgs"
             && let Some(owner) = snapshot.target(object, "_owner")
@@ -725,6 +763,19 @@ impl<'a> AsyncGraph<'a> {
             waiters_of: BTreeMap::new(),
             waits: BTreeMap::new(),
             remaining_nodes: 1_000_000,
+            semaphore_waiters: index_wait_queues(
+                snapshot
+                    .objects(&snapshot.type_ids(|name| name == "System.Threading.SemaphoreSlim"))
+                    .into_iter()
+                    .map(|owner| {
+                        (
+                            owner,
+                            snapshot.target(owner, "m_asyncHead"),
+                            snapshot.target(owner, "m_asyncTail"),
+                        )
+                    }),
+                |node| snapshot.target(node, "Next"),
+            ),
         };
         let boxes = snapshot.type_ids(|s| {
             s.contains("+AsyncStateMachineBox`1<")
@@ -1237,6 +1288,29 @@ mod tests {
             serde_json::to_value(snapshot.async_check().unwrap().as_ref()).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn semaphore_wait_queues_are_walked_once_and_reject_ambiguous_or_broken_lists() {
+        use std::cell::Cell;
+        let count = 20_000;
+        let visits = Cell::new(0);
+        let owners = index_wait_queues([(count, Some(0), Some(count - 1))], |node| {
+            visits.set(visits.get() + 1);
+            (node + 1 < count).then_some(node + 1)
+        });
+        assert_eq!(visits.get(), count);
+        assert_eq!(owners.len(), count);
+        assert!(owners.values().all(|&owner| owner == count));
+        let owners = index_wait_queues([(10, Some(0), Some(2)), (11, Some(1), Some(2))], |node| {
+            (node < 2).then_some(node + 1)
+        });
+        assert_eq!(owners, HashMap::from([(0, 10)]));
+        assert!(
+            index_wait_queues([(10, Some(0), Some(2))], |node| Some((node + 1) % 3)).is_empty()
+        );
+        assert!(index_wait_queues([(10, Some(0), Some(2))], |_| None).is_empty());
+        assert!(index_wait_queues([(10, None, None)], |_| unreachable!()).is_empty());
     }
 
     fn method(name: &str, awaited: Option<usize>) -> Method {

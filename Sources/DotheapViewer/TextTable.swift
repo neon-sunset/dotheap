@@ -12,6 +12,7 @@ struct TableSort: Equatable {
 /// takes seconds. The table sorts its rows when they or the sort change, not on each update. Without a sort, the rows
 /// keep their order.
 struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
+    @Environment(\.typeNameStyle) private var typeNameStyle
     enum CellFont { case regular, monospaced, digits }
 
     struct Column {
@@ -22,7 +23,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
         let flexible: Bool
         let font: CellFont
         let truncation: NSLineBreakMode
-        let typeNameStyle: TypeNameStyle?
+        let isTypeName: ((Row) -> Bool)?
         let text: (Row) -> String
         let color: ((Row) -> NSColor?)?
         let help: ((Row) -> String)?
@@ -39,22 +40,22 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
 
         init<V: Comparable>(_ title: String, width: CGFloat, minWidth: CGFloat = 40, flexible: Bool = false, font: CellFont = .regular,
                             truncation: NSLineBreakMode = .byTruncatingTail, value: @escaping (Row) -> V, text: @escaping (Row) -> String,
-                            color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, typeNameStyle: TypeNameStyle? = nil) {
+                            color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, isTypeName: ((Row) -> Bool)? = nil) {
             self.init(title, width: width, minWidth: minWidth, flexible: flexible, font: font, truncation: truncation, ascending: { value($0) < value($1) },
-                      text: text, color: color, help: help, typeNameStyle: typeNameStyle)
+                      text: text, color: color, help: help, isTypeName: isTypeName)
         }
 
         /// A column that does not sort.
         init(_ title: String, width: CGFloat, minWidth: CGFloat = 40, flexible: Bool = false, font: CellFont = .regular,
              truncation: NSLineBreakMode = .byTruncatingTail, ascending: ((Row, Row) -> Bool)? = nil, text: @escaping (Row) -> String,
-             color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, typeNameStyle: TypeNameStyle? = nil) {
+             color: ((Row) -> NSColor?)? = nil, help: ((Row) -> String)? = nil, isTypeName: ((Row) -> Bool)? = nil) {
             self.title = title
             self.width = width
             self.minWidth = minWidth
             self.flexible = flexible
             self.font = font
             self.truncation = truncation
-            self.typeNameStyle = typeNameStyle
+            self.isTypeName = isTypeName
             self.text = text
             self.color = color
             self.help = help
@@ -66,18 +67,20 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
     let id: (Row) -> ID
     let columns: [Column]
     @Binding var sort: TableSort?
+    var group: ((Row) -> String)?
     var selection: ID?
     /// Called when the user selects a row, or with nil when the user clears the selection. Without it, rows cannot be
     /// selected.
     var select: ((ID?) -> Void)?
 
     init<Rows: RandomAccessCollection>(rows: Rows, id: @escaping (Row) -> ID, columns: [Column],
-                                      sort: Binding<TableSort?>, selection: ID? = nil,
+                                      sort: Binding<TableSort?>, group: ((Row) -> String)? = nil, selection: ID? = nil,
                                       select: ((ID?) -> Void)? = nil) where Rows.Element == Row {
         self.rows = AnyRandomAccessCollection(rows)
         self.id = id
         self.columns = columns
         _sort = sort
+        self.group = group
         self.selection = selection
         self.select = select
     }
@@ -111,7 +114,8 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
-        let styleChanged = c.parent.columns.map(\.typeNameStyle) != columns.map(\.typeNameStyle)
+        let styleChanged = c.style != typeNameStyle
+        c.style = typeNameStyle
         c.parent = self
         if let table = c.table {
             if table.numberOfColumns != columns.count {
@@ -123,7 +127,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
                 table.tableColumns[k].title = column.title
             }
         }
-        if !c.applied || c.rows.count != rows.count || !c.rows.elementsEqual(rows, by: { id($0) == id($1) }) || c.sort != sort {
+        if !c.applied || c.isGrouped != (group != nil) || c.rows.count != rows.count || !c.rows.elementsEqual(rows, by: { id($0) == id($1) }) || c.sort != sort {
             c.rows = rows
             c.apply(sort)
         }
@@ -138,6 +142,10 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
         var sorted = AnyRandomAccessCollection<Row>([])
         var sort: TableSort?
         var applied = false
+        var style = TypeNameStyle.standard
+        var isGrouped = false
+        private enum DisplayRow { case header(String), value(Int) }
+        private var grouped: [DisplayRow]?
         private var rowOfId: [ID: Int] = [:]
         private var updating = false
         private var fitting = false
@@ -172,7 +180,27 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
                 updating = true
                 table.sortDescriptors = []
             }
-            rowOfId = Dictionary(sorted.enumerated().map { (parent.id($0.element), $0.offset) }, uniquingKeysWith: { a, _ in a })
+            isGrouped = parent.group != nil
+            grouped = nil
+            if let group = parent.group {
+                var seen = Set<String>()
+                let titles = rows.map(group).filter { seen.insert($0).inserted }
+                let partitions = Dictionary(grouping: sorted, by: group)
+                var values: [Row] = [], displayed: [DisplayRow] = []
+                rowOfId = [:]
+                for title in titles {
+                    displayed.append(.header(title))
+                    for value in partitions[title] ?? [] {
+                        rowOfId[parent.id(value)] = displayed.count
+                        displayed.append(.value(values.count))
+                        values.append(value)
+                    }
+                }
+                sorted = AnyRandomAccessCollection(values)
+                grouped = displayed
+            } else {
+                rowOfId = Dictionary(sorted.enumerated().map { (parent.id($0.element), $0.offset) }, uniquingKeysWith: { a, _ in a })
+            }
             table.reloadData()
             updating = false
         }
@@ -250,26 +278,52 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
             fit()
         }
 
-        func numberOfRows(in tableView: NSTableView) -> Int { sorted.count }
+        func numberOfRows(in tableView: NSTableView) -> Int { grouped?.count ?? sorted.count }
+
+        private func value(at row: Int) -> Row? {
+            let index: Int
+            if let grouped {
+                guard case let .value(value) = grouped[row] else { return nil }
+                index = value
+            } else { index = row }
+            return sorted[sorted.index(sorted.startIndex, offsetBy: index)]
+        }
+
+        func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+            if let grouped, case .header = grouped[row] { return true }
+            return false
+        }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            if let grouped, case let .header(title) = grouped[row] {
+                let identifier = NSUserInterfaceItemIdentifier("group")
+                let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? NSTableCellView
+                    ?? makeCell(identifier, Column("", width: 200, text: { _ in "" }))
+                cell.textField?.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+                cell.textField?.stringValue = title
+                cell.textField?.toolTip = title
+                return cell
+            }
             guard let tableColumn, let k = Int(tableColumn.identifier.rawValue), k < parent.columns.count else { return nil }
             let column = parent.columns[k]
-            let r = sorted[sorted.index(sorted.startIndex, offsetBy: row)]
+            guard let r = value(at: row) else { return nil }
             if let bar = column.bar {
                 let view = tableView.makeView(withIdentifier: tableColumn.identifier, owner: nil) as? BarView ?? BarView()
                 view.identifier = tableColumn.identifier
                 view.segments = bar(r)
                 return view
             }
-            let cell = tableView.makeView(withIdentifier: tableColumn.identifier, owner: nil) as? NSTableCellView ?? makeCell(tableColumn.identifier, column)
-            if let field = cell.textField as? TypeNameField, let style = column.typeNameStyle {
-                field.name = column.text(r)
-                field.style = style
+            let identifier = NSUserInterfaceItemIdentifier(tableColumn.identifier.rawValue + (column.isTypeName == nil ? "/text" : "/type"))
+            let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? NSTableCellView ?? makeCell(identifier, column)
+            let text = column.text(r), isTypeName = column.isTypeName?(r) == true
+            if let field = cell.textField as? TypeNameField {
+                field.name = text
+                field.style = isTypeName ? style : .standard
                 field.needsLayout = true
-            } else { cell.textField?.stringValue = column.text(r) }
+                field.setAccessibilityValue(field.name)
+            } else { cell.textField?.stringValue = text }
             cell.textField?.textColor = column.color?(r) ?? .labelColor
-            cell.textField?.toolTip = column.help?(r)
+            cell.textField?.toolTip = column.help?(r) ?? (isTypeName ? text : nil)
             return cell
         }
 
@@ -277,7 +331,7 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
             let cell = NSTableCellView()
             cell.identifier = identifier
             let text: NSTextField
-            if column.typeNameStyle != nil {
+            if column.isTypeName != nil {
                 let field = TypeNameField(labelWithString: "")
                 field.singleLine = true
                 text = field
@@ -306,11 +360,11 @@ struct TextTable<Row, ID: Hashable>: NSViewRepresentable {
             parent.sort = TableSort(column: parent.columns[k].title, ascending: d.ascending)
         }
 
-        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { parent.select != nil }
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { parent.select != nil && value(at: row) != nil }
 
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard !updating, let table else { return }
-            parent.select?(table.selectedRow >= 0 ? parent.id(sorted[sorted.index(sorted.startIndex, offsetBy: table.selectedRow)]) : nil)
+            parent.select?(table.selectedRow >= 0 ? value(at: table.selectedRow).map(parent.id) : nil)
         }
     }
 }
@@ -335,8 +389,8 @@ final class BarView: NSView {
 }
 
 extension TextTable where Row: Identifiable, ID == Row.ID {
-    init<Rows: RandomAccessCollection>(rows: Rows, columns: [Column], sort: Binding<TableSort?>,
+    init<Rows: RandomAccessCollection>(rows: Rows, columns: [Column], sort: Binding<TableSort?>, group: ((Row) -> String)? = nil,
                                       selection: ID? = nil, select: ((ID?) -> Void)? = nil) where Rows.Element == Row {
-        self.init(rows: rows, id: \.id, columns: columns, sort: sort, selection: selection, select: select)
+        self.init(rows: rows, id: \.id, columns: columns, sort: sort, group: group, selection: selection, select: select)
     }
 }

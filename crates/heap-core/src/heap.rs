@@ -34,6 +34,7 @@ pub enum Gc {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GcState {
+    pub uses_regions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dynamic_adaptation: Option<bool>,
     pub background: bool,
@@ -41,6 +42,7 @@ pub struct GcState {
 impl Default for GcState {
     fn default() -> Self {
         Self {
+            uses_regions: false,
             dynamic_adaptation: None,
             background: true,
         }

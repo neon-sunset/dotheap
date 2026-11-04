@@ -232,7 +232,7 @@ struct GarbageView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     TextTable(rows: groups, columns: [
                         .init("Type of the unreferenced dead object", width: 300, flexible: true, truncation: .byTruncatingMiddle, value: \.type,
-                              text: { TypeNames.short($0.type) }, help: { $0.type }),
+                              text: { TypeNames.short($0.type) }, help: { $0.type }, isTypeName: { _ in true }),
                         .init("Objects", width: 80, font: .digits, value: \.unreferenced, text: { $0.unreferenced.formatted() }),
                         .init("Garbage held", width: 110, font: .digits, value: \.retained, text: { Format.bytes($0.retained) }),
                     ], sort: $order, selection: selected, select: { selected = $0 })
@@ -298,7 +298,7 @@ struct HeapUseView: View {
             Computed(snapshot, key: "finalizable", label: "Reading the finalization lists", compute: { try $0.finalizableObjects() }) { (rows: RustArray<HeapSnapshot.Finalizable>) in
                 TextTable(rows: rows, columns: [
                     .init("Type", width: 260, minWidth: 160, flexible: true, truncation: .byTruncatingMiddle, value: \.type,
-                          text: { TypeNames.short($0.type) }, help: { $0.type }),
+                          text: { TypeNames.short($0.type) }, help: { $0.type }, isTypeName: { _ in true }),
                     .init("Live, registered", width: 105, font: .digits, value: \.liveRegistered, text: { $0.liveRegistered.formatted() }),
                     .init("Live, suppressed", width: 110, font: .digits, value: \.liveSuppressed, text: { $0.liveSuppressed.formatted() },
                           color: { _ in .secondaryLabelColor }),
@@ -313,7 +313,7 @@ struct HeapUseView: View {
         case .collections:
             Computed(snapshot, key: "collections", label: "Reading collections", compute: { try $0.collectionCapacity() }) { (rows: RustArray<HeapSnapshot.CollectionCapacity>) in
                 TextTable(rows: rows, columns: [
-                    .init("Collection", width: 160, minWidth: 100, flexible: true, value: \.type, text: \.type),
+                    .init("Collection", width: 160, minWidth: 100, flexible: true, value: \.type, text: \.type, isTypeName: { _ in true }),
                     .init("Instances", width: 75, font: .digits, value: \.instances, text: { $0.instances.formatted() }),
                     .init("Empty", width: 60, font: .digits, value: \.empty, text: { $0.empty.formatted() }),
                     .init("Slots", width: 90, font: .digits, value: \.slots, text: { $0.slots.formatted() }),
@@ -326,7 +326,7 @@ struct HeapUseView: View {
             Computed(snapshot, key: "zeros", label: "Scanning arrays", compute: { try $0.mostlyZeroArrays() }) { (rows: RustArray<HeapSnapshot.ZeroArrays>) in
                 TextTable(rows: rows, columns: [
                     .init("Type", width: 260, minWidth: 160, flexible: true, truncation: .byTruncatingMiddle, value: \.type,
-                          text: { TypeNames.short($0.type) }, help: { $0.type }),
+                          text: { TypeNames.short($0.type) }, help: { $0.type }, isTypeName: { _ in true }),
                     .init("Arrays", width: 70, font: .digits, value: \.arrays, text: { $0.arrays.formatted() }),
                     .init("Bytes", width: 85, font: .digits, value: \.bytes, text: { Format.bytes($0.bytes) }),
                     .init("Zero bytes", width: 85, font: .digits, value: \.zeroBytes, text: { Format.bytes($0.zeroBytes) }),
@@ -344,7 +344,7 @@ struct HeapUseView: View {
         case .boxed:
             Computed(snapshot, key: "boxed", label: "Counting boxed values", compute: { try $0.boxedValues() }) { (rows: RustArray<HeapSnapshot.TypeCount>) in
                 TextTable(rows: rows, columns: [
-                    .init("Type", width: 260, minWidth: 160, flexible: true, truncation: .byTruncatingMiddle, value: \.type, text: \.type, help: { $0.type }),
+                    .init("Type", width: 260, minWidth: 160, flexible: true, truncation: .byTruncatingMiddle, value: \.type, text: \.type, help: { $0.type }, isTypeName: { _ in true }),
                     .init("Live", width: 70, font: .digits, value: \.live, text: { $0.live.formatted() }),
                     .init("Dead", width: 70, font: .digits, value: \.dead, text: { $0.dead.formatted() }),
                     .init("Bytes", width: 85, font: .digits, value: \.bytes, text: { Format.bytes($0.bytes) }),
@@ -411,7 +411,7 @@ struct FragmentationView: View {
                             .pickerStyle(.segmented).onChange(of: grouping) { contributor = nil }
                         TextTable(rows: rows, columns: [
                             .init(grouping == .code ? "Code holding the survivors" : grouping == .type ? "Survivor type" : "Owner", width: 300, flexible: true,
-                                  truncation: .byTruncatingMiddle, value: \.name, text: { TypeNames.short($0.name) }, help: { $0.name }),
+                                  truncation: .byTruncatingMiddle, value: \.name, text: { TypeNames.short($0.name) }, help: { $0.name }, isTypeName: { _ in true }),
                             .init("Free and dead", width: 105, font: .digits, value: \.waste, text: { Format.bytes(UInt64($0.waste)) }),
                             .init("Survivors", width: 85, font: .digits, value: \.liveBytes, text: { Format.bytes($0.liveBytes) }),
                             .init("Regions", width: 65, font: .digits, value: \.regionCount, text: { $0.regionCount.formatted() }),
@@ -511,13 +511,13 @@ struct ContributorDetail: View {
             if !contributor.survivorTypes.isEmpty {
                 Text("Survivors").font(.subheadline.weight(.semibold))
                 ForEach(contributor.survivorTypes, id: \.name) { t in
-                    HStack { Text(TypeNames.short(t.name)).lineLimit(1).truncationMode(.middle); Spacer(); Text(Format.bytes(t.bytes)).monospacedDigit() }.font(.callout)
+                    HStack { TypeNameText(name: TypeNames.short(t.name), singleLine: true); Spacer(); Text(Format.bytes(t.bytes)).monospacedDigit() }.font(.callout)
                 }
             }
             if !contributor.deadAround.isEmpty {
                 Text("Dead around them, not swept yet (\(Format.bytes(UInt64(contributor.deadAroundBytes))))").font(.subheadline.weight(.semibold))
                 ForEach(contributor.deadAround, id: \.name) { t in
-                    HStack { Text(TypeNames.short(t.name)).lineLimit(1).truncationMode(.middle); Spacer(); Text(Format.bytes(UInt64(t.bytes))).monospacedDigit() }.font(.callout)
+                    HStack { TypeNameText(name: TypeNames.short(t.name), singleLine: true); Spacer(); Text(Format.bytes(UInt64(t.bytes))).monospacedDigit() }.font(.callout)
                 }
             }
             Text("Survivors keeping the most free space").font(.subheadline.weight(.semibold))

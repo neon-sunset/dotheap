@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-const CACHE_FORMAT: &str = "rust-10";
+const CACHE_FORMAT: &str = "rust-11";
 
 pub fn convert_dump(
     source: &Path,
@@ -677,6 +677,15 @@ impl HeapSnapshot {
         groups
     }
     pub fn occupancy(&self) -> Vec<OccupancyHistogram> {
+        if self
+            .heap
+            .kind
+            .stock
+            .as_ref()
+            .is_some_and(|gc| !gc.uses_regions)
+        {
+            return Vec::new();
+        }
         let mut groups = BTreeMap::new();
         for r in self.heap.regions.iter().filter(|r| r.size() == GRANULE) {
             let h = groups
