@@ -1,5 +1,6 @@
 use heap_core::{
-    analysis::HeapSnapshot, cache::CacheChoice, compressed::atomic_write, graph::AnalysisOptions,
+    analysis::HeapSnapshot, cache::CacheChoice, column::ColumnStore, compressed::atomic_write,
+    graph::AnalysisOptions,
 };
 use std::{fs, path::Path, process::Command, sync::Mutex};
 
@@ -19,6 +20,7 @@ fn invalid_heap_and_graph_caches_are_rebuilt_from_the_dump() {
     );
     let path = fixtures.join("reference-rooted.dmp");
     let cache = directory.path().join("cache");
+    let store = ColumnStore::new(Some(cache.clone())).unwrap();
     let open = || {
         let progress = Mutex::new(Vec::new());
         let snapshot = HeapSnapshot::open(
@@ -80,12 +82,24 @@ fn invalid_heap_and_graph_caches_are_rebuilt_from_the_dump() {
         "region",
         "layout",
         "type-count",
+        "format",
+        "schema",
+        "missing-manifest",
     ] {
+        fs::write(cache.join("obsolete.col"), b"unused column").unwrap();
+        let unused = cache.join("rust-results/invalid-format");
+        fs::create_dir_all(&unused).unwrap();
+        fs::write(unused.join("report.json"), b"{}").unwrap();
         match case {
+            "missing-manifest" => fs::remove_file(cache.join("manifest.json")).unwrap(),
             "missing" => fs::remove_file(cache.join("addresses.col")).unwrap(),
             "truncated" => atomic_write(&cache.join("references.items.col"), &[]).unwrap(),
             "reference" => {
-                atomic_write(&cache.join("references.items.col"), &i32::MAX.to_le_bytes()).unwrap()
+                store
+                    .copy(&[i32::MAX], Some("references.items"))
+                    .unwrap()
+                    .flush()
+                    .unwrap();
             }
             "parent-cycle" | "dominator-cycle" | "address-index" | "large-size" => {
                 let (name, value) = match case {
@@ -94,10 +108,10 @@ fn invalid_heap_and_graph_caches_are_rebuilt_from_the_dump() {
                     "address-index" => ("granuleFirst.col", u32::MAX),
                     _ => ("sizes.col", u32::MAX),
                 };
-                let file = cache.join(name);
-                let mut bytes = fs::read(&file).unwrap();
-                bytes[..4].copy_from_slice(&value.to_le_bytes());
-                atomic_write(&file, &bytes).unwrap();
+                let name = name.strip_suffix(".col").unwrap();
+                let mut values = store.open::<u32>(name).unwrap().to_vec();
+                values[0] = value;
+                store.copy(&values, Some(name)).unwrap().flush().unwrap();
             }
             _ => {
                 let file = cache.join("manifest.json");
@@ -107,6 +121,10 @@ fn invalid_heap_and_graph_caches_are_rebuilt_from_the_dump() {
                     "region" => manifest["heap"]["regions"][0]["objectStart"] = 0u64.into(),
                     "layout" => manifest["core"]["segments"][0]["address"] = u64::MAX.into(),
                     "type-count" => manifest["typeStats"][0]["count"] = 0u64.into(),
+                    "format" => {
+                        manifest["format"] = "unsupported".into();
+                    }
+                    "schema" => manifest = serde_json::json!({"format": "unsupported"}),
                     _ => unreachable!(),
                 }
                 atomic_write(&file, &serde_json::to_vec(&manifest).unwrap()).unwrap();
@@ -114,6 +132,8 @@ fn invalid_heap_and_graph_caches_are_rebuilt_from_the_dump() {
         }
         let rebuilt = open();
         assert!(!rebuilt.from_cache, "{case}");
+        assert!(!cache.join("rust-results/invalid-format").exists());
+        assert!(!cache.join("obsolete.col").exists());
         assert_eq!(
             &rebuilt.heap.addresses[..],
             &original.heap.addresses[..],
@@ -145,8 +165,26 @@ fn invalid_heap_and_graph_caches_are_rebuilt_from_the_dump() {
         let path = graph_directory.join(file);
         let original = fs::read(&path).unwrap();
         atomic_write(&path, &invalid).unwrap();
+        fs::write(graph_directory.join("obsolete.col"), b"unused column").unwrap();
         let rebuilt = open().native_graph().unwrap();
         assert!(rebuilt.chunks.is_empty(), "{file}");
         assert_eq!(fs::read(&path).unwrap(), original, "{file}");
+        assert!(!graph_directory.join("obsolete.col").exists());
     }
+
+    let ownership = open().ownership().unwrap();
+    let ownership_directory = graph_directory.parent().unwrap().join("ownership");
+    fs::write(ownership_directory.join("obsolete.col"), b"unused column").unwrap();
+    atomic_write(
+        &ownership_directory.join("manifest.json"),
+        br#"{"format":99}"#,
+    )
+    .unwrap();
+    let rebuilt = open().ownership().unwrap();
+    assert_eq!(&rebuilt.idom[..], &ownership.idom[..]);
+    assert_eq!(
+        &rebuilt.retained_managed[..],
+        &ownership.retained_managed[..]
+    );
+    assert!(!ownership_directory.join("obsolete.col").exists());
 }

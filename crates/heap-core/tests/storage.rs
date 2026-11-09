@@ -71,8 +71,66 @@ fn replacing_a_column_preserves_an_open_snapshot() {
     assert_eq!(&opened[..], &[1, 2, 3]);
     assert_eq!(&second[..], &[5, 8, 13, 21]);
     assert_eq!(&store.open::<u64>("objects").unwrap()[..], &[5, 8, 13, 21]);
-    store.make::<u8>(0, Some("empty")).unwrap();
+    store.make::<u8>(0, Some("empty")).unwrap().flush().unwrap();
     assert_eq!(store.open::<u8>("empty").unwrap().len(), 0);
+}
+
+#[test]
+fn compressed_columns_preserve_bits_and_reject_damaged_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ColumnStore::new(Some(dir.path().into())).unwrap();
+    let mut seed = 0x89ab_cdef_0123_4567u64;
+    let values: Vec<_> = (0..(3 << 17) + 19)
+        .map(|i| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            if i % 3 == 0 { seed } else { u64::MAX }
+        })
+        .collect();
+    for delta in [false, true] {
+        let mut column = store.copy(&values, Some("bits")).unwrap();
+        if delta {
+            column = column.with_delta_encoding();
+        }
+        column.flush().unwrap();
+        assert_eq!(&store.open::<u64>("bits").unwrap()[..], &values);
+    }
+    assert!(store.open::<u32>("bits").is_err());
+    let path = dir.path().join("bits.col");
+    let packed = std::fs::read(&path).unwrap();
+    for at in [0, 8, 16, 24, 32, packed.len() - 1] {
+        let mut damaged = packed.clone();
+        damaged[at] ^= 0x80;
+        std::fs::write(&path, damaged).unwrap();
+        assert!(store.open::<u64>("bits").is_err(), "byte {at}");
+    }
+    for length in [0, 7, 23, 31, packed.len() - 1] {
+        std::fs::write(&path, &packed[..length]).unwrap();
+        assert!(store.open::<u64>("bits").is_err(), "length {length}");
+    }
+    let increasing: Vec<_> = (0..100_000u64).map(|i| 0x7000_0000_0000 + i * 24).collect();
+    store
+        .copy(&increasing, Some("addresses"))
+        .unwrap()
+        .with_delta_encoding()
+        .flush()
+        .unwrap();
+    assert!(
+        std::fs::metadata(dir.path().join("addresses.col"))
+            .unwrap()
+            .len()
+            < 4096
+    );
+    assert_eq!(&store.open::<u64>("addresses").unwrap()[..], &increasing);
+    let wrapping = [0u32, u32::MAX, 0, 1, 0x8000_0000, 17];
+    store
+        .copy(&wrapping, Some("wrapping"))
+        .unwrap()
+        .with_delta_encoding()
+        .flush()
+        .unwrap();
+    assert_eq!(&store.open::<u32>("wrapping").unwrap()[..], &wrapping);
 }
 
 #[test]

@@ -236,6 +236,14 @@ struct RegionWalk {
 }
 
 impl ManagedHeap {
+    pub(crate) fn flush(&self) -> Result<()> {
+        self.addresses.flush()?;
+        for column in [&self.type_ids, &self.sizes32, &self.lengths] {
+            column.flush()?;
+        }
+        self.granule_first.flush()
+    }
+
     pub fn new(
         dump: Arc<CoreDump>,
         runtime: Option<&RuntimeInfo>,
@@ -559,7 +567,10 @@ impl ManagedHeap {
             r.walk_stopped_after_gap = result.stopped_after_gap;
             r.first_unparsed_object = result.first_unparsed_object;
         }
-        self.addresses = self.store.make(total, Some("addresses"))?;
+        self.addresses = self
+            .store
+            .make(total, Some("addresses"))?
+            .with_delta_encoding();
         self.sizes32 = self.store.make(total, Some("sizes"))?;
         self.lengths = self.store.make(total, Some("lengths"))?;
         let mut tables: Column<u64> = self.store.make(total, None)?;

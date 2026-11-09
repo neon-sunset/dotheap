@@ -52,16 +52,15 @@ pub fn identity(path: &Path) -> Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        // Leave out the change time, so that a metadata-only change to the dump does not invalidate its cache.
         Ok(format!(
-            "{}\n{} {} {} {} {} {} {}",
+            "{}\n{} {} {} {} {}",
             path.display(),
             m.dev(),
             m.ino(),
             m.len(),
             m.mtime(),
-            m.mtime_nsec(),
-            m.ctime(),
-            m.ctime_nsec()
+            m.mtime_nsec()
         ))
     }
     #[cfg(not(unix))]
@@ -695,6 +694,12 @@ pub fn needs_conversion(path: &Path) -> Result<bool> {
         && index_frames(&input, Progress::none()).is_none())
 }
 
+pub fn has_cached_blocks(path: &Path, directory: &Path) -> bool {
+    identity(path).is_ok_and(|expected| {
+        fs::read_to_string(directory.join("core.dump")).is_ok_and(|saved| saved == expected)
+    }) && directory.join("core.blocks").is_file()
+}
+
 pub fn convert(
     source: &Path,
     target: Option<&Path>,
@@ -858,6 +863,20 @@ fn verify_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_changes_with_contents_but_not_with_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("core.zst");
+        fs::write(&path, b"dump").unwrap();
+        let before = identity(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(identity(&path).unwrap(), before);
+        fs::write(&path, b"other dump").unwrap();
+        assert_ne!(identity(&path).unwrap(), before);
+    }
 
     #[test]
     fn read_back_verification_rejects_changed_or_truncated_frames() {

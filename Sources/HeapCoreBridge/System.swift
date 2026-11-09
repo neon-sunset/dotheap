@@ -38,7 +38,9 @@ public enum LiveProcess {
 }
 
 public enum DumpConversion {
-    public static func needed(_ path: String) throws -> Bool { try RustHeapCore.dumpNeedsConversion(path: path) }
+    public static func needed(_ path: String, options: AnalysisOptions) throws -> Bool {
+        try RustHeapCore.dumpNeedsConversion(path: path, nativeMemoryRoots: options.nativeMemoryRoots)
+    }
     public static func convert(_ source: String, to target: String?,
                                progress: @escaping (String, Double) -> Void,
                                cancelled: @escaping () -> Bool) throws -> [String] {

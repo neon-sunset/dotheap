@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-const CACHE_FORMAT: &str = "rust-11";
+const CACHE_FORMAT: &str = "rust-12";
 
 pub fn convert_dump(
     source: &Path,
@@ -296,6 +296,9 @@ impl HeapSnapshot {
             .as_ref()
             .map(|p| CacheGuard::lock(p))
             .transpose()?;
+        if matches!(cache, CacheChoice::Automatic | CacheChoice::Rebuild) {
+            let _ = crate::cache::remove_replaced(path);
+        }
         let before = identity(path)?;
         let mut saved: Option<Manifest> = directory
             .as_ref()
@@ -305,10 +308,11 @@ impl HeapSnapshot {
             .filter(|m| {
                 m.format == CACHE_FORMAT && m.dump_identity == before && m.options == options
             });
-        if saved.is_none()
-            && let Some(dir) = &directory
-        {
-            let _ = fs::remove_file(dir.join("manifest.json"));
+        if let Some(dir) = &directory {
+            crate::cache::discard_results(dir, saved.is_none())?;
+            if saved.is_none() {
+                crate::cache::discard_columns(dir)?;
+            }
         }
         let reading = progress.portion(0.0, 0.5).named("Opening the dump");
         let discard_failed_cache = |error| {
@@ -392,7 +396,8 @@ impl HeapSnapshot {
             cached
         } else {
             if let Some(directory) = &directory {
-                let _ = fs::remove_file(directory.join("manifest.json"));
+                crate::cache::discard_results(directory, true)?;
+                crate::cache::discard_columns(directory)?;
             }
             if had_saved {
                 dump = Arc::new(
@@ -487,6 +492,8 @@ impl HeapSnapshot {
         }
         if let Some(dir) = directory {
             if !from_cache {
+                snapshot.heap.flush()?;
+                snapshot.graph.flush()?;
                 let manifest = Manifest {
                     format: CACHE_FORMAT.into(),
                     dump_identity: before,
@@ -540,10 +547,9 @@ impl HeapSnapshot {
             let path = self
                 .results_directory
                 .as_ref()
-                .map(|dir| dir.join(format!("{key}.json")));
+                .map(|dir| dir.join(format!("{key}.json.zst")));
             if let Some(path) = &path
-                && let Ok(bytes) = fs::read(path)
-                && let Ok(value) = serde_json::from_slice(&bytes)
+                && let Ok(value) = crate::cache::read_result(path)
             {
                 return Ok(value);
             }
@@ -551,7 +557,7 @@ impl HeapSnapshot {
             self.dump.check()?;
             if let Some(path) = path {
                 crate::column::create_directory(path.parent().unwrap())?;
-                atomic_write(&path, &serde_json::to_vec(&value)?)?;
+                crate::cache::write_result(&path, &value)?;
             }
             Ok(value)
         })

@@ -8,6 +8,12 @@ final class ViewerWindows {
     @ObservationIgnored private let sessions = NSMapTable<NSWindow, Session>(keyOptions: .weakMemory, valueOptions: .weakMemory)
     private var revision = 0
 
+    init() {
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cacheChanged() }
+        }
+    }
+
     var cacheChanges: [Int] {
         [revision] + (sessions.objectEnumerator()?.allObjects.compactMap { ($0 as? Session)?.cacheChanges } ?? [])
     }

@@ -5495,11 +5495,15 @@ pub unsafe extern "C" fn dh_read_Vec_Process(pointer: *const c_void) -> Slice {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dh_dump_needs_conversion(path: Slice) -> Outcome {
+pub unsafe extern "C" fn dh_dump_needs_conversion(
+    path: Slice,
+    native_memory_roots: bool,
+) -> Outcome {
     unsafe {
         ffi::call(|| {
             Ok(Owned::new(crate::system::dump_needs_conversion(
                 ffi::string(path),
+                native_memory_roots,
             )?))
         })
     }

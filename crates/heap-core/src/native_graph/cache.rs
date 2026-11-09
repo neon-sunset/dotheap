@@ -39,7 +39,7 @@ impl NativeGraphData {
             return Ok(data);
         }
         if let Some(dir) = &directory {
-            let _ = fs::remove_file(dir.join("manifest.json"));
+            crate::cache::discard_columns(dir)?;
         }
         let data = Self::new(snapshot)?;
         data.validate(snapshot.heap.count())?;
@@ -156,9 +156,15 @@ impl NativeGraphData {
                 .map(|&v| u8::from(v))
                 .collect::<Vec<_>>(),
         )?;
-        save_column(store, "edgeStart", &self.edge_start)?;
+        store
+            .copy(&self.edge_start, Some("edgeStart"))?
+            .with_delta_encoding()
+            .flush()?;
         save_column(store, "edgeTargets", &self.edge_targets)?;
-        save_column(store, "referrerStart", &self.referrer_start)?;
+        store
+            .copy(&self.referrer_start, Some("referrerStart"))?
+            .with_delta_encoding()
+            .flush()?;
         save_column(store, "referrerItems", &self.referrer_items)?;
         save_column(store, "chunkDominator", &self.chunk_dominator)?;
         save_column(store, "firstWords", &self.first_words)?;
@@ -219,7 +225,10 @@ fn save_map<K: Ord + Pod, V: Pod>(
     }
     items.flush()?;
     save_column(store, &format!("{name}.keys"), &keys)?;
-    save_column(store, &format!("{name}.start"), &starts)
+    store
+        .copy(&starts, Some(&format!("{name}.start")))?
+        .with_delta_encoding()
+        .flush()
 }
 
 fn load_map<K: Ord + Pod, V: Pod>(store: &ColumnStore, name: &str) -> Result<BTreeMap<K, Vec<V>>> {
@@ -341,7 +350,12 @@ mod tests {
         ] {
             let path = directory.path().join(format!("{name}.col"));
             let original = fs::read(&path).unwrap();
-            atomic_write(&path, &bytes).unwrap();
+            match name {
+                "chunks" => replace::<[u64; 3]>(&store, name, &bytes),
+                "reach" | "edgeExact" => replace::<u8>(&store, name, &bytes),
+                "edgeTargets" | "chunkDominator" => replace::<i32>(&store, name, &bytes),
+                _ => replace::<u64>(&store, name, &bytes),
+            }
             assert!(
                 NativeGraphData::load(&store)
                     .and_then(|data| data.validate(3))
@@ -350,5 +364,13 @@ mod tests {
             );
             atomic_write(&path, &original).unwrap();
         }
+    }
+
+    fn replace<T: Pod>(store: &ColumnStore, name: &str, bytes: &[u8]) {
+        let values: Vec<T> = bytes
+            .chunks_exact(size_of::<T>())
+            .map(bytemuck::pod_read_unaligned)
+            .collect();
+        store.copy(&values, Some(name)).unwrap().flush().unwrap();
     }
 }

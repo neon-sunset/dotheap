@@ -885,7 +885,7 @@ DHOutcome dh_Snapshot_socket_text(const void * pointer, uintptr_t object);
 DHOutcome dh_Snapshot_path_avoiding(const void * pointer, uintptr_t object, DHSlice types);
 DHOutcome dh_processes(void);
 DHSlice dh_read_Vec_Process(const void * pointer);
-DHOutcome dh_dump_needs_conversion(DHSlice path);
+DHOutcome dh_dump_needs_conversion(DHSlice path, bool native_memory_roots);
 DHOutcome dh_convert_dump(DHSlice source, DHOptionalString target, DHProgress progress);
 DHOutcome dh_smaps_next_to_dump(DHSlice path);
 DHOutcome dh_default_dump_path(const void * process, bool runtime);
