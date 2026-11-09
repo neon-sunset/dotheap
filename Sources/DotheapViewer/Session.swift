@@ -256,7 +256,7 @@ final class Session {
                 var dump = dump
                 var smaps = smaps
                 var conversionWarnings: [String] = []
-                if suggestConversion, !rebuild, try DumpConversion.needed(dump) {
+                if suggestConversion, !rebuild, try DumpConversion.needed(dump, options: options) {
                     switch await self.conversionChoice(dump) {
                     case .cancel:
                         await MainActor.run { self.loading = false }

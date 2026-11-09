@@ -256,7 +256,7 @@ impl OwnershipGraph {
             return Ok(graph);
         }
         if let Some(dir) = &directory {
-            let _ = std::fs::remove_file(dir.join("manifest.json"));
+            crate::cache::discard_columns(dir)?;
         }
         let out = Self::new(s, &store)?;
         s.dump.check()?;

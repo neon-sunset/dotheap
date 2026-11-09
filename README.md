@@ -379,8 +379,12 @@ replacing the dump invalidates its cached analysis.
 | Linux | `$XDG_CACHE_HOME/dotheap`, or `~/.cache/dotheap` |
 | Windows | `%LOCALAPPDATA%\dotheap`, or `%TEMP%\dotheap` if `LOCALAPPDATA` is unset |
 
-`dotheap cache` prints the actual root. Object and reference data use files the OS can page out,
-but working memory still depends on object counts, references and the requested analysis.
+`dotheap cache` prints the actual root. Object and reference columns and saved reports are compressed
+on disk. Columns decode in parallel into memory for direct array access. Working memory depends on
+object counts, references and the requested analysis.
+
+Unsupported cache data is deleted automatically. Results in use are kept until a later open can
+remove them.
 
 Dumps written by Dotheap are read directly as compressed blocks. Other `.zst` files may need a
 second compressed copy in the cache; allow space comparable to the compressed source. Random

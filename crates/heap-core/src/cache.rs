@@ -1,13 +1,151 @@
 use crate::{
     Error, Result, column::create_directory, compressed::identity, graph::AnalysisOptions,
 };
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
+    io::BufWriter,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
+
+pub(crate) fn read_result<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = zstd::stream::decode_all(File::open(path)?)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub(crate) fn write_result<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::cache("result has no parent folder"))?;
+    create_directory(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    let mut encoder = zstd::stream::write::Encoder::new(file.as_file_mut(), 1)?;
+    encoder.include_checksum(true)?;
+    let mut writer = BufWriter::with_capacity(64 << 10, encoder);
+    serde_json::to_writer(&mut writer, value)?;
+    writer.into_inner().map_err(|e| e.into_error())?.finish()?;
+    file.as_file().sync_all()?;
+    crate::column::persist(file, path)
+}
+
+pub(crate) fn discard_columns(directory: &Path) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if (name == "manifest.json"
+            || path.extension().is_some_and(|e| e == "col")
+                && !name.to_string_lossy().starts_with("core."))
+            && !entry.file_type()?.is_dir()
+        {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn discard_results(directory: &Path, invalidate: bool) -> Result<()> {
+    let root = directory.join("rust-results");
+    if !fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    'directory: for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            if path.extension().is_some_and(|e| e == "invalid")
+                && !path.with_extension("").exists()
+                && let Err(error) = fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error.into());
+            }
+            continue;
+        }
+        let marker = path.with_extension("invalid");
+        if invalidate {
+            crate::compressed::atomic_write(&marker, b"")?;
+        } else if !marker.is_file() {
+            continue;
+        }
+        let mut guards = Vec::new();
+        for name in ["native-graph", "ownership"] {
+            let child = path.join(name);
+            if fs::symlink_metadata(&child).is_ok_and(|m| m.is_dir()) {
+                match CacheGuard::try_lock(&child) {
+                    Ok(Some(guard)) => guards.push(guard),
+                    _ => continue 'directory,
+                }
+            }
+        }
+        fs::remove_dir_all(path)?;
+        fs::remove_file(marker)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod compressed_results {
+    use super::*;
+
+    #[test]
+    fn results_in_use_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = dir.path().join("rust-results/invalid-format");
+        let guard = CacheGuard::lock(&result.join("ownership")).unwrap();
+        discard_results(dir.path(), true).unwrap();
+        assert!(result.is_dir());
+        assert!(result.with_extension("invalid").is_file());
+        let current = dir.path().join("rust-results/current");
+        fs::create_dir(&current).unwrap();
+        drop(guard);
+        discard_results(dir.path(), false).unwrap();
+        assert!(!result.exists());
+        assert!(!result.with_extension("invalid").exists());
+        assert!(current.is_dir());
+    }
+
+    #[test]
+    fn discarded_columns_leave_dump_storage_and_other_files_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CacheGuard::lock(dir.path()).unwrap();
+        let kept = [
+            "core.index.col",
+            "core.starts.col",
+            "core.blocks",
+            "core.dump",
+            "dump.path",
+            "capture.dmp",
+            "notes.txt",
+        ];
+        for name in kept.into_iter().chain(["obsolete.col", "manifest.json"]) {
+            fs::write(dir.path().join(name), b"contents").unwrap();
+        }
+        discard_columns(dir.path()).unwrap();
+        for name in kept {
+            assert_eq!(fs::read(dir.path().join(name)).unwrap(), b"contents");
+        }
+        assert!(!dir.path().join("obsolete.col").exists());
+        assert!(!dir.path().join("manifest.json").exists());
+        assert!(dir.path().join(".lock").exists());
+    }
+
+    #[test]
+    fn results_are_compressed_and_checksum_failures_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json.zst");
+        let value = vec!["repeated result"; 10_000];
+        write_result(&path, &value).unwrap();
+        assert_eq!(read_result::<Vec<String>>(&path).unwrap(), value);
+        let mut bytes = fs::read(&path).unwrap();
+        assert!(bytes.len() < 1024);
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert!(read_result::<Vec<String>>(&path).is_err());
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum CacheChoice {
@@ -34,8 +172,8 @@ pub fn root() -> PathBuf {
         });
     path.unwrap_or_else(std::env::temp_dir).join("dotheap")
 }
-pub fn hash(text: &str) -> u64 {
-    text.bytes().fold(0xcbf29ce484222325, |h, b| {
+pub fn hash(bytes: impl AsRef<[u8]>) -> u64 {
+    bytes.as_ref().iter().fold(0xcbf29ce484222325, |h, &b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     })
 }
@@ -261,6 +399,42 @@ pub fn remove_captured_dump(entry: &CacheEntry) -> Result<()> {
     remove_in(&root(), entry, true)
 }
 
+/// Remove the unlocked analysis caches of earlier dumps at this path, so that a replaced dump does not leave its cache behind.
+pub fn remove_replaced(dump: &Path) -> Result<()> {
+    remove_replaced_in(&root(), dump)
+}
+fn remove_replaced_in(root: &Path, dump: &Path) -> Result<()> {
+    let root = root.canonicalize()?;
+    let current = [false, true]
+        .map(|native_memory_roots| {
+            CacheChoice::Automatic.directory(
+                dump,
+                AnalysisOptions {
+                    native_memory_roots,
+                },
+            )
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let current: Vec<_> = current
+        .iter()
+        .flatten()
+        .filter_map(|d| d.file_name())
+        .collect();
+    let dump = dump.canonicalize()?;
+    for directory in analysis_entries_in(&root, false)
+        .into_iter()
+        .filter(|e| e.dump_path.as_ref() == Some(&dump))
+        .flat_map(|e| e.directories)
+        .filter(|d| d.file_name().is_some_and(|n| !current.contains(&n)))
+    {
+        if let Ok(_guard) = lock_analysis(&root, &directory) {
+            fs::remove_dir_all(&directory)?;
+        }
+    }
+    Ok(())
+}
+
 fn lock_analysis(root: &Path, directory: &Path) -> Result<CacheGuard> {
     let canonical = directory.canonicalize()?;
     if canonical.parent() != Some(root)
@@ -405,6 +579,39 @@ mod tests {
         assert!(!first.exists() && !second.exists());
         assert!(dump.exists() && residency.exists());
         assert!(entry(root, &dump).directories.is_empty());
+    }
+
+    #[test]
+    fn replaced_dump_analysis_is_removed_unless_locked() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let dump = temp.path().join("core.zst");
+        let other = temp.path().join("other.zst");
+        write(&dump);
+        write(&other);
+        let name = |native_memory_roots| {
+            let options = AnalysisOptions {
+                native_memory_roots,
+            };
+            let directory = CacheChoice::Automatic.directory(&dump, options).unwrap();
+            directory
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let current = analysis(&root, &name(false), &dump);
+        let native_roots = analysis(&root, &name(true), &dump);
+        let replaced = analysis(&root, "core.zst-replaced", &dump);
+        let busy = analysis(&root, "core.zst-busy", &dump);
+        let unrelated = analysis(&root, "other.zst-cache", &other);
+        let _guard = CacheGuard::lock(&busy).unwrap();
+        remove_replaced_in(&root, &dump).unwrap();
+        assert!(!replaced.exists());
+        for kept in [current, native_roots, busy, unrelated] {
+            assert!(kept.exists());
+        }
     }
 
     #[test]

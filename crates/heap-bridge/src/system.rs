@@ -8,8 +8,16 @@ pub fn processes() -> Vec<Process> {
     heap_core::live_process::list()
 }
 
-pub fn dump_needs_conversion(path: &str) -> Result<bool> {
-    Ok(heap_core::compressed::needs_conversion(Path::new(path))?)
+pub fn dump_needs_conversion(path: &str, native_memory_roots: bool) -> Result<bool> {
+    let path = Path::new(path);
+    if !heap_core::compressed::needs_conversion(path)? {
+        return Ok(false);
+    }
+    let options = heap_core::graph::AnalysisOptions {
+        native_memory_roots,
+    };
+    let directory = heap_core::cache::CacheChoice::Automatic.directory(path, options)?;
+    Ok(!directory.is_some_and(|d| heap_core::compressed::has_cached_blocks(path, &d)))
 }
 
 pub fn convert_dump(

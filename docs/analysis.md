@@ -349,9 +349,17 @@ pages can make these pages resident. Satori requests huge pages with `DOTNET_gcT
 stock CoreCLR can receive them under Linux's `always` setting. Partially committed granules, such
 as a huge region's tail, cannot use a full 2 MiB page.
 
-Object arrays, reference graphs and ownership data use file-backed storage. Working memory depends
-on object and reference counts and on the analysis being built. It is not bounded by compressed
-dump size. Cached forward references avoid repeated full scans.
+Object arrays, reference graphs and ownership data use compressed column files. Each column has an
+eight-byte offset per independently compressed block of at most 1 MiB, plus a final offset.
+Zstd level 1 frames include checksums. Integer columns use byte shuffling; addresses and adjacency offsets also use
+delta encoding. ARM64 uses NEON for byte shuffling, with a portable implementation on other CPUs.
+
+Columns decode in parallel into contiguous memory. Graph traversal and object lookups access these
+arrays directly. Construction and scratch arrays use anonymous memory. Cache writes compress bounded
+batches and replace each file atomically; the manifest is written after all columns are saved.
+Detailed reports use compressed JSON. Working memory depends on object and reference counts and on
+the analysis being built. It is not bounded by compressed dump size. Cached forward references avoid
+repeated full scans.
 
 Compressed input has two storage paths:
 

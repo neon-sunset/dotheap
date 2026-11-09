@@ -101,10 +101,12 @@ impl CompressedRows {
         })
     }
     pub fn from_rows(rows: &[Vec<i32>], store: &ColumnStore, name: Option<&str>) -> Result<Self> {
-        let mut start = store.make(
-            rows.len() + 1,
-            name.map(|n| format!("{n}.start")).as_deref(),
-        )?;
+        let mut start = store
+            .make(
+                rows.len() + 1,
+                name.map(|n| format!("{n}.start")).as_deref(),
+            )?
+            .with_delta_encoding();
         for (i, row) in rows.iter().enumerate() {
             start[i + 1] = start[i] + row.len() as u64;
         }
@@ -166,8 +168,9 @@ impl CompressedRows {
         store: &ColumnStore,
         name: Option<&str>,
     ) -> Result<Self> {
-        let mut start: Column<u64> =
-            store.make(columns + 1, name.map(|n| format!("{n}.start")).as_deref())?;
+        let mut start: Column<u64> = store
+            .make(columns + 1, name.map(|n| format!("{n}.start")).as_deref())?
+            .with_delta_encoding();
         for &v in &self.items[..] {
             if v < 0 || v as usize >= columns {
                 return Err(Error::cache("graph target is outside the object index"));
@@ -203,6 +206,11 @@ impl CompressedRows {
             return Err(Error::cache(format!("invalid graph column {name}")));
         }
         Ok(rows)
+    }
+
+    pub(crate) fn flush(&self) -> Result<()> {
+        self.start.flush()?;
+        self.items.flush()
     }
 }
 
@@ -253,6 +261,26 @@ impl std::ops::Deref for HeapGraph {
 }
 
 impl HeapGraph {
+    pub(crate) fn flush(&self) -> Result<()> {
+        self.live.flush()?;
+        self.pending.flush()?;
+        for column in [&self.parent, &self.root_slot_objects, &self.idom] {
+            column.flush()?;
+        }
+        self.root_slot_addresses.flush()?;
+        self.retained.flush()?;
+        for rows in [
+            &self.reference_rows,
+            &self.referrer_rows,
+            &self.source_rows,
+            &self.sources_of,
+            &self.dominator_rows,
+        ] {
+            rows.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn new(
         heap: &mut ManagedHeap,
         runtime: Option<&RuntimeInfo>,
@@ -591,7 +619,8 @@ fn build_references(heap: &ManagedHeap, progress: Progress<'_>) -> Result<Compre
         .collect::<Result<_>>()?;
     let mut start: Column<u64> = heap
         .store
-        .make(heap.count() + 1, Some("references.start"))?;
+        .make(heap.count() + 1, Some("references.start"))?
+        .with_delta_encoding();
     let counted = progress.portion(0.0, 0.5).counter(heap.count() as u64);
     start[1..]
         .par_chunks_mut(2048)
@@ -1142,7 +1171,9 @@ fn dominators_with_progress(
         let v = vertex[w] as usize;
         retained[idom[v] as usize] += retained[v];
     }
-    let mut start: Column<u64> = store.make(total + 1, Some("dominatorChildren.start"))?;
+    let mut start: Column<u64> = store
+        .make(total + 1, Some("dominatorChildren.start"))?
+        .with_delta_encoding();
     for &p in &idom[..] {
         if p >= 0 {
             start[p as usize + 1] += 1;

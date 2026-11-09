@@ -47,6 +47,16 @@ final class NavigationTests: XCTestCase {
         return view.subviews.lazy.compactMap { self.firstView(type, in: $0) }.first
     }
 
+    @MainActor private func waitForView<T: NSView>(_ type: T.Type, in pages: PageContainer) async throws -> T {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            pages.layoutSubtreeIfNeeded()
+            if let view = firstView(type, in: pages) { return view }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return try XCTUnwrap(firstView(type, in: pages))
+    }
+
     @MainActor func testDominatorAddressFitsAndSharesTheNameBaseline() throws {
         _ = NSApplication.shared
         let snapshot = try snapshot()
@@ -356,9 +366,8 @@ final class NavigationTests: XCTestCase {
         let snapshot = try snapshot(), session = Session(), pages = PageContainer(), window = window(pages)
         defer { window.close() }
         pages.show(.types, snapshot: snapshot) { TypesView(snapshot: snapshot).environment(session) }
-        try await settle(pages)
-        let field = try XCTUnwrap(firstView(NSTextField.self, in: pages))
-        let table = try XCTUnwrap(firstView(NSTableView.self, in: pages))
+        let field = try await waitForView(NSTextField.self, in: pages)
+        let table = try await waitForView(NSTableView.self, in: pages)
         field.stringValue = "No matching type"
         field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
         try await settle(pages)

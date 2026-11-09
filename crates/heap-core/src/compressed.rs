@@ -48,33 +48,45 @@ impl CompressorPool {
 
 pub fn identity(path: &Path) -> Result<String> {
     let path = path.canonicalize()?;
-    let m = fs::metadata(&path)?;
+    let mut file = File::open(&path)?;
+    let m = file.metadata()?;
+    let ends = ends_hash(&mut file, m.len())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        // Hash both ends of the file instead of using the change time, so that a metadata-only change does not invalidate the cache.
         Ok(format!(
-            "{}\n{} {} {} {} {} {} {}",
+            "{}\n{} {} {} {} {} {ends:x}",
             path.display(),
             m.dev(),
             m.ino(),
             m.len(),
             m.mtime(),
-            m.mtime_nsec(),
-            m.ctime(),
-            m.ctime_nsec()
+            m.mtime_nsec()
         ))
     }
     #[cfg(not(unix))]
     {
-        let (volume, index) = file_id(&File::open(&path)?)?;
+        let (volume, index) = file_id(&file)?;
         Ok(format!(
-            "{}\n{volume} {index} {} {:?} {:?}",
+            "{}\n{volume} {index} {} {:?} {:?} {ends:x}",
             path.display(),
             m.len(),
             m.modified()?,
             m.created()?
         ))
     }
+}
+
+fn ends_hash(file: &mut File, len: u64) -> Result<u64> {
+    const SAMPLE: u64 = 64 << 10;
+    let mut bytes = vec![0; SAMPLE.min(len) as usize];
+    file.read_exact(&mut bytes)?;
+    file.seek(SeekFrom::Start(
+        len.saturating_sub(SAMPLE).max(bytes.len() as u64),
+    ))?;
+    file.read_to_end(&mut bytes)?;
+    Ok(crate::cache::hash(&bytes))
 }
 
 #[cfg(unix)]
@@ -695,6 +707,12 @@ pub fn needs_conversion(path: &Path) -> Result<bool> {
         && index_frames(&input, Progress::none()).is_none())
 }
 
+pub fn has_cached_blocks(path: &Path, directory: &Path) -> bool {
+    identity(path).is_ok_and(|expected| {
+        fs::read_to_string(directory.join("core.dump")).is_ok_and(|saved| saved == expected)
+    }) && directory.join("core.blocks").is_file()
+}
+
 pub fn convert(
     source: &Path,
     target: Option<&Path>,
@@ -858,6 +876,27 @@ fn verify_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_changes_with_contents_but_not_with_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("core.zst");
+        fs::write(&path, b"dump").unwrap();
+        let before = identity(&path).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(identity(&path).unwrap(), before);
+        fs::write(&path, b"core").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_ne!(identity(&path).unwrap(), before);
+    }
 
     #[test]
     fn read_back_verification_rejects_changed_or_truncated_frames() {

@@ -2,11 +2,14 @@ use crate::{Error, Result};
 use bytemuck::Pod;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use std::{
-    fs::{self, File},
+    fs,
     marker::PhantomData,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
 };
+
+mod codec;
+mod shuffle;
 
 enum Storage {
     Read(Mmap),
@@ -16,6 +19,8 @@ enum Storage {
 pub struct Column<T: Pod> {
     storage: Storage,
     count: usize,
+    path: Option<PathBuf>,
+    delta: bool,
     marker: PhantomData<T>,
 }
 
@@ -41,18 +46,31 @@ impl<T: Pod> DerefMut for Column<T> {
 
 impl<T: Pod> Column<T> {
     pub fn flush(&self) -> Result<()> {
-        if let Storage::Write(m) = &self.storage {
-            m.flush()?;
+        if let Storage::Write(m) = &self.storage
+            && let Some(path) = &self.path
+        {
+            codec::write(
+                path,
+                &m[..self.count * size_of::<T>()],
+                size_of::<T>(),
+                self.delta,
+            )?;
         }
         Ok(())
     }
 
     pub fn freeze(self) -> Result<Self> {
+        self.flush()?;
         let storage = match self.storage {
             Storage::Write(m) => Storage::Read(m.make_read_only()?),
             s => s,
         };
         Ok(Self { storage, ..self })
+    }
+
+    pub fn with_delta_encoding(mut self) -> Self {
+        self.delta = true;
+        self
     }
 }
 
@@ -76,28 +94,15 @@ impl ColumnStore {
         let bytes = count
             .checked_mul(size_of::<T>())
             .ok_or_else(|| Error::cache("column is too large"))?;
-        let map = if let Some(dir) = &self.directory {
-            let path = name.map(|name| dir.join(format!("{name}.col")));
-            let parent = path.as_ref().and_then(|p| p.parent()).unwrap_or(dir);
-            create_directory(parent)?;
-            let file = tempfile::NamedTempFile::new_in(parent)?;
-            file.as_file().set_len(bytes as u64)?;
-            // A new inode keeps any snapshot of the previous column valid.
-            let map = if bytes == 0 {
-                MmapOptions::new().len(1).map_anon()?
-            } else {
-                unsafe { MmapOptions::new().len(bytes).map_mut(file.as_file())? }
-            };
-            if let Some(path) = path {
-                persist(file, &path)?;
-            }
-            map
-        } else {
-            MmapOptions::new().len(bytes.max(1)).map_anon()?
-        };
+        let map = MmapOptions::new().len(bytes.max(1)).map_anon()?;
         Ok(Column {
             storage: Storage::Write(map),
             count,
+            path: self
+                .directory
+                .as_ref()
+                .and_then(|dir| name.map(|name| dir.join(format!("{name}.col")))),
+            delta: false,
             marker: PhantomData,
         })
     }
@@ -114,23 +119,12 @@ impl ColumnStore {
             .as_ref()
             .ok_or_else(|| Error::cache("no cache folder"))?
             .join(format!("{name}.col"));
-        let file = File::open(&path)?;
-        let bytes = usize::try_from(file.metadata()?.len())
-            .map_err(|_| Error::cache("column is too large"))?;
-        if size_of::<T>() == 0 || bytes % size_of::<T>() != 0 {
-            return Err(Error::cache(format!(
-                "invalid column size: {}",
-                path.display()
-            )));
-        }
-        if bytes == 0 {
-            return self.make(0, None);
-        }
-        // Cache files are immutable while a snapshot uses them.
-        let map = unsafe { MmapOptions::new().map(&file)? };
+        let (map, count) = codec::read(&path, size_of::<T>())?;
         Ok(Column {
-            storage: Storage::Read(map),
-            count: bytes / size_of::<T>(),
+            storage: Storage::Read(map.make_read_only()?),
+            count,
+            path: None,
+            delta: false,
             marker: PhantomData,
         })
     }

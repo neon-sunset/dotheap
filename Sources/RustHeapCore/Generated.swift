@@ -2992,9 +2992,9 @@ public func processes() -> RustArray<Process> {
     return withExtendedLifetime(result) { read_Vec_Process(result.pointer, result) }
 }
 
-public func dumpNeedsConversion(path: String) throws -> Bool {
+public func dumpNeedsConversion(path: String, nativeMemoryRoots: Bool) throws -> Bool {
     return try withRustString(path) { path in
-        let result = try take(dh_dump_needs_conversion(path))
+        let result = try take(dh_dump_needs_conversion(path, nativeMemoryRoots))
         return withExtendedLifetime(result) { read_bool(result.pointer, result) }
     }
 }

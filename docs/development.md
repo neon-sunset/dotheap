@@ -65,6 +65,15 @@ The comparison checks every JSON value and array order. It prints the paths of d
 returns a nonzero status if any differ. `times.txt` records command durations separately.
 Recordings contain data from the dump and must be kept private.
 
+To measure cache construction and reopening, use an isolated cache directory:
+
+```sh
+cargo run --release --locked -p heap-core --example cache_benchmark -- core.dmp ./benchmark-cache
+```
+
+The output separates heap and graph loading, native analysis and ownership analysis, and includes
+cache disk use. Repeat the command to measure reopening. OS file caching affects the timings.
+
 ## .NET version compatibility
 
 The 10.0.0–10.0.13 releases were checked against the corresponding release tags in
