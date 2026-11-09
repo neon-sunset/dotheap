@@ -159,7 +159,25 @@ def core(path, *, layout="current", base=32, component=0, length=0,
 
 
 def column(cache, name, fmt, count=None):
-    data = (cache / (name + ".col")).read_bytes()
+    packed = (cache / (name + ".col")).read_bytes()
+    assert packed[:8] == b"DTHCOL01", name
+    width, length = struct.unpack_from("<QQ", packed, 8)
+    block = (1 << 20) // width * width
+    offsets = struct.unpack_from(f"<{-(-length // block) + 1}Q", packed, 24)
+    data = bytearray()
+    for start, end in zip(offsets, offsets[1:]):
+        frame = subprocess.check_output(["zstd", "-dqc", "-"], input=packed[start:end])
+        mode, values = frame[0], frame[1:]
+        if mode:
+            n = len(values) // width
+            values = bytearray(values[b * n + i] for i in range(n) for b in range(width))
+        if mode == 2:
+            previous, mask = 0, (1 << 8 * width) - 1
+            for i in range(0, len(values), width):
+                previous = (previous + int.from_bytes(values[i:i + width], "little")) & mask
+                values[i:i + width] = previous.to_bytes(width, "little")
+        data += values
+    assert len(data) == length, name
     if count is not None:
         data = data[:count * struct.calcsize("<" + fmt)]
     return [v[0] for v in struct.iter_unpack("<" + fmt, data)]
