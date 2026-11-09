@@ -48,13 +48,15 @@ impl CompressorPool {
 
 pub fn identity(path: &Path) -> Result<String> {
     let path = path.canonicalize()?;
-    let m = fs::metadata(&path)?;
+    let mut file = File::open(&path)?;
+    let m = file.metadata()?;
+    let ends = ends_hash(&mut file, m.len())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        // Leave out the change time, so that a metadata-only change to the dump does not invalidate its cache.
+        // Hash both ends of the file instead of using the change time, so that a metadata-only change does not invalidate the cache.
         Ok(format!(
-            "{}\n{} {} {} {} {}",
+            "{}\n{} {} {} {} {} {ends:x}",
             path.display(),
             m.dev(),
             m.ino(),
@@ -65,15 +67,26 @@ pub fn identity(path: &Path) -> Result<String> {
     }
     #[cfg(not(unix))]
     {
-        let (volume, index) = file_id(&File::open(&path)?)?;
+        let (volume, index) = file_id(&file)?;
         Ok(format!(
-            "{}\n{volume} {index} {} {:?} {:?}",
+            "{}\n{volume} {index} {} {:?} {:?} {ends:x}",
             path.display(),
             m.len(),
             m.modified()?,
             m.created()?
         ))
     }
+}
+
+fn ends_hash(file: &mut File, len: u64) -> Result<u64> {
+    const SAMPLE: u64 = 64 << 10;
+    let mut bytes = vec![0; SAMPLE.min(len) as usize];
+    file.read_exact(&mut bytes)?;
+    file.seek(SeekFrom::Start(
+        len.saturating_sub(SAMPLE).max(bytes.len() as u64),
+    ))?;
+    file.read_to_end(&mut bytes)?;
+    Ok(crate::cache::hash(&bytes))
 }
 
 #[cfg(unix)]
@@ -872,9 +885,16 @@ mod tests {
         let path = dir.path().join("core.zst");
         fs::write(&path, b"dump").unwrap();
         let before = identity(&path).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(identity(&path).unwrap(), before);
-        fs::write(&path, b"other dump").unwrap();
+        fs::write(&path, b"core").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
         assert_ne!(identity(&path).unwrap(), before);
     }
 

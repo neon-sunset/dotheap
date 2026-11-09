@@ -172,8 +172,8 @@ pub fn root() -> PathBuf {
         });
     path.unwrap_or_else(std::env::temp_dir).join("dotheap")
 }
-pub fn hash(text: &str) -> u64 {
-    text.bytes().fold(0xcbf29ce484222325, |h, b| {
+pub fn hash(bytes: impl AsRef<[u8]>) -> u64 {
+    bytes.as_ref().iter().fold(0xcbf29ce484222325, |h, &b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     })
 }
